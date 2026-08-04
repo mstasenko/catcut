@@ -1,0 +1,21 @@
+import { describe, expect, it, vi } from 'vitest'
+
+vi.mock('electron', () => ({ app: { getPath: vi.fn(() => '/tmp/catcut') } }))
+vi.mock('./binaries', () => ({ bundledMemePath: () => '/tmp/meme' }))
+
+import { categoryFor, displayName } from './assets'
+
+describe('media library names', () => {
+  it('shows clean names without extensions, counters, or separators', () => {
+    expect(displayName('/media/01-a-few_moments-later.wav')).toBe('a few moments later')
+    expect(displayName('/media/Wilhelm Scream.ogg')).toBe('Wilhelm Scream')
+  })
+
+  it('recognizes every supported library category', () => {
+    expect(categoryFor('picture.jpg')).toBe('image')
+    expect(categoryFor('reaction.gif')).toBe('gif')
+    expect(categoryFor('clip.webm')).toBe('video')
+    expect(categoryFor('effect.ogg')).toBe('audio')
+    expect(categoryFor('notes.txt')).toBeNull()
+  })
+})

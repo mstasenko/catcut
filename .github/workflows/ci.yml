@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-package:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 22.22.1
+          cache: npm
+
+      - name: Install GNOME Wayland test runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes gnome-shell libgbm1 libgtk-3-0 libnss3 libasound2t64
+
+      - name: Install dependencies
+        run: |
+          npm install --global npm@11.18.0
+          npm ci
+          npm audit --omit=dev --audit-level=high
+
+      - name: Check quality and test all functionality
+        run: npm test
+
+      - name: Build AppImage
+        run: npm run package
+
+      - name: Smoke-test packaged AppImage on Wayland
+        run: |
+          set +e
+          node scripts/run-headless-wayland.mjs \
+            timeout 10s env APPIMAGE_EXTRACT_AND_RUN=1 release/*.AppImage \
+            >"$RUNNER_TEMP/appimage-smoke.log" 2>&1
+          status=$?
+          set -e
+          if ! test "$status" -eq 0 -o "$status" -eq 124; then
+            cat "$RUNNER_TEMP/appimage-smoke.log"
+            exit 1
+          fi
+
+      - name: Upload reports and AppImage
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: catcut-ubuntu26-wayland-${{ github.sha }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            release/*.AppImage
+            coverage/
+            playwright-report/
+            test-results/
+
+      - name: Upload separate meme pack
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: catcut-memes-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            release/catcut-meme-pack.zip
