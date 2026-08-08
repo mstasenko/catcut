@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import type { EditSession, Overlay, TextOverlay } from '@shared/types'
+import type { EditSession, ImageOverlay, Overlay, TextOverlay } from '@shared/types'
 import { EditorWorkspace, ExportProgress, GpuWarning, StatusBanners, Welcome } from './components/AppLayout'
 import { selectedOverlay, useEditorStore } from './model/store'
 import { timelineDuration } from './model/timeline'
@@ -40,7 +40,6 @@ async function renderText(overlay: TextOverlay, width: number, height: number): 
   context.font = `700 ${pixels}px "${overlay.fontFamily}"`
   context.textBaseline = 'top'
   context.textAlign = overlay.align
-  context.globalAlpha = overlay.opacity
   context.fillStyle = overlay.color
   context.strokeStyle = overlay.outlineColor
   context.lineJoin = 'round'
@@ -66,12 +65,43 @@ async function renderText(overlay: TextOverlay, width: number, height: number): 
   return canvas.toDataURL('image/png')
 }
 
+function loadedImage(url: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new Image()
+    image.onload = () => resolve(image)
+    image.onerror = () => reject(new Error('The SVG image could not be loaded'))
+    image.src = url
+  })
+}
+
+async function renderSvg(overlay: ImageOverlay): Promise<string> {
+  const image = await loadedImage(await window.catcut.getSvgDataUrl(overlay.path))
+  const naturalWidth = Math.max(1, image.naturalWidth)
+  const naturalHeight = Math.max(1, image.naturalHeight)
+  const scale = Math.min(1, 4096 / naturalWidth, 4096 / naturalHeight)
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.max(1, Math.round(naturalWidth * scale))
+  canvas.height = Math.max(1, Math.round(naturalHeight * scale))
+  const context = canvas.getContext('2d')
+  if (!context) throw new Error('Canvas image renderer is unavailable')
+  context.drawImage(image, 0, 0, canvas.width, canvas.height)
+  return canvas.toDataURL('image/png')
+}
+
+function isSvgImage(overlay: Overlay): overlay is ImageOverlay {
+  return overlay.type === 'image' && overlay.path.toLowerCase().endsWith('.svg')
+}
+
 async function prepareOverlay(overlay: Overlay, session: EditSession): Promise<Overlay> {
-  if (overlay.type !== 'text') return overlay
-  return {
-    ...overlay,
-    renderedImageDataUrl: await renderText(overlay, session.source.width, session.source.height)
+  if (overlay.type === 'text') {
+    return {
+      ...overlay,
+      renderedImageDataUrl: await renderText(overlay, session.source.width, session.source.height)
+    }
   }
+  return isSvgImage(overlay)
+    ? { ...overlay, renderedImageDataUrl: await renderSvg(overlay) }
+    : overlay
 }
 
 function shortcutId(event: KeyboardEvent): string {
@@ -172,7 +202,7 @@ export default function App(): React.JSX.Element {
     if (exporting) return
     const file = event.dataTransfer.files[0]
     if (!file) return
-    await store.loadVideo(window.catcut.getDroppedPath(file))
+    await store.loadVideo(await window.catcut.getDroppedPath(file))
   }
 
   return (

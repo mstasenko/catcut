@@ -29,7 +29,11 @@ const api: CatCutApi = {
   cancelJob: (id: string) => ipcRenderer.invoke('job:cancel', id) as Promise<boolean>,
   getGpuDiagnostics: () => ipcRenderer.invoke('gpu:diagnostics') as Promise<GpuDiagnostics>,
   getPathUrl: (path: string) => ipcRenderer.invoke('media:url', path) as Promise<string>,
-  getDroppedPath: (file: File) => webUtils.getPathForFile(file),
+  getSvgDataUrl: (path: string) => ipcRenderer.invoke('media:svg-data', path) as Promise<string>,
+  getDroppedPath: (file: File) => {
+    const path = webUtils.getPathForFile(file)
+    return ipcRenderer.invoke('media:authorize-drop', path) as Promise<string>
+  },
   onOpenPath: (callback: (path: string) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, path: string): void => callback(path)
     ipcRenderer.on('app:open-path', listener)

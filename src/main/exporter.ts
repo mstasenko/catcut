@@ -4,10 +4,9 @@ import { mkdir, mkdtemp, rename, rm, statfs, writeFile } from 'node:fs/promises'
 import { dirname, extname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { promisify } from 'node:util'
-import { nativeImage } from 'electron'
 import type { ExportRequest, Overlay, TextOverlay, VisualOverlayBase } from '../types'
 import { ffmpegPath, ffprobePath } from './binaries'
-import { exportEncoder } from './export-encoder'
+import { exportEncoder, softwareEncoder } from './export-encoder'
 import { jobs } from './jobs'
 
 const execFileAsync = promisify(execFile)
@@ -21,9 +20,12 @@ function seconds(value: number): string {
   return Math.max(0, value).toFixed(6)
 }
 
-async function prepareTextImage(overlay: TextOverlay, directory: string): Promise<string> {
+async function prepareRenderedImage(
+  overlay: Pick<TextOverlay, 'id' | 'name' | 'renderedImageDataUrl'>,
+  directory: string
+): Promise<string> {
   if (!overlay.renderedImageDataUrl?.startsWith('data:image/png;base64,')) {
-    throw new Error(`Text overlay “${overlay.name}” was not rendered before export`)
+    throw new Error(`Overlay “${overlay.name}” was not rendered before export`)
   }
   const path = join(directory, `${overlay.id}.png`)
   const encoded = overlay.renderedImageDataUrl.slice('data:image/png;base64,'.length)
@@ -32,14 +34,10 @@ async function prepareTextImage(overlay: TextOverlay, directory: string): Promis
 }
 
 async function prepareVisualPath(overlay: Overlay, directory: string): Promise<string> {
-  if (overlay.type === 'text') return prepareTextImage(overlay, directory)
+  if (overlay.type === 'text') return prepareRenderedImage(overlay, directory)
   if (overlay.type === 'audio') throw new Error('Audio overlays do not have a visual path')
   if (extname(overlay.path).toLowerCase() !== '.svg') return overlay.path
-  const image = nativeImage.createFromPath(overlay.path)
-  if (image.isEmpty()) throw new Error(`Could not render image: ${overlay.path}`)
-  const path = join(directory, `${overlay.id}.png`)
-  await writeFile(path, image.toPNG())
-  return path
+  return prepareRenderedImage(overlay, directory)
 }
 
 function visualGeometry(overlay: VisualOverlayBase, width: number, height: number): {
@@ -136,9 +134,12 @@ function visualFilter(
   const fullScreen = fillsFrame(overlay)
   const scale = visualScale(fullScreen, geometry, source.width, source.height)
   const position = fullScreen ? { x: 0, y: 0 } : geometry
+  const trim = 'sourceIn' in overlay
+    ? `trim=start=${seconds(overlay.sourceIn)}:end=${seconds(overlay.sourceIn + overlay.duration)}`
+    : `trim=duration=${seconds(overlay.duration)}`
   filters.push(
-    `[${index}:v:0]trim=duration=${seconds(overlay.duration)},setpts=PTS-STARTPTS+${seconds(overlay.start)}/TB,` +
-    `${scale},format=rgba,colorchannelmixer=aa=${overlay.opacity}[ov${order}]`,
+    `[${index}:v:0]${trim},setpts=PTS-STARTPTS+${seconds(overlay.start)}/TB,` +
+    `${scale},colorchannelmixer=aa=${overlay.opacity}[ov${order}]`,
     `[${inputLabel}][ov${order}]overlay=x=${position.x}:y=${position.y}:` +
     `eof_action=pass:repeatlast=1:enable='between(t,${seconds(overlay.start)},${seconds(overlay.start + overlay.duration)})'` +
     `[${outputLabel}]`
@@ -151,9 +152,12 @@ function fillsFrame(overlay: VisualOverlayBase): boolean {
 }
 
 function visualScale(fullScreen: boolean, geometry: ReturnType<typeof visualGeometry>, width: number, height: number): string {
-  if (!fullScreen) return `scale=${geometry.width}:${geometry.height}:force_original_aspect_ratio=decrease`
+  if (!fullScreen) {
+    return `scale=${geometry.width}:${geometry.height}:force_original_aspect_ratio=decrease,format=rgba,` +
+      `pad=${geometry.width}:${geometry.height}:(ow-iw)/2:(oh-ih)/2:color=black@0`
+  }
   return `scale=${width}:${height}:force_original_aspect_ratio=decrease,` +
-    `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black@0`
+    `format=rgba,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black@0`
 }
 
 function addVisualFilters(filters: string[], inputs: PreparedInput[], request: ExportRequest): string {
@@ -176,8 +180,9 @@ function addAudioFilters(filters: string[], inputs: PreparedInput[]): void {
   audioInputs.forEach(({ overlay, index }, order) => {
     const delay = Math.round(overlay.start * 1000)
     const volume = overlay.type === 'audio' || overlay.type === 'video' ? overlay.volume : 1
+    const sourceIn = overlay.type === 'audio' || overlay.type === 'video' ? overlay.sourceIn : 0
     filters.push(
-      `[${index}:a:0]atrim=duration=${seconds(overlay.duration)},asetpts=PTS-STARTPTS,` +
+      `[${index}:a:0]atrim=start=${seconds(sourceIn)}:end=${seconds(sourceIn + overlay.duration)},asetpts=PTS-STARTPTS,` +
       `volume=${volume},adelay=${delay}|${delay}[aov${order}]`
     )
     audioLabels.push(`[aov${order}]`)
@@ -245,11 +250,7 @@ export async function exportVideo(request: ExportRequest): Promise<{ jobId: stri
   const jobId = randomUUID()
 
   try {
-    if (await canStreamCopy(request)) {
-      await streamCopy(request, temporaryDirectory, temporaryOutput, duration, jobId)
-    } else {
-      await encodeVideo(request, temporaryDirectory, temporaryOutput, duration, jobId)
-    }
+    await writeExport(request, temporaryDirectory, temporaryOutput, duration, jobId)
     await rename(temporaryOutput, request.outputPath)
     return { jobId, outputPath: request.outputPath }
   } catch (error) {
@@ -258,6 +259,32 @@ export async function exportVideo(request: ExportRequest): Promise<{ jobId: stri
   } finally {
     await rm(temporaryDirectory, { recursive: true, force: true })
   }
+}
+
+async function writeExport(
+  request: ExportRequest,
+  directory: string,
+  output: string,
+  duration: number,
+  jobId: string
+): Promise<void> {
+  if (!await canStreamCopy(request)) {
+    await encodeVideo(request, directory, output, duration, jobId)
+    return
+  }
+  try {
+    await streamCopy(request, directory, output, duration, jobId)
+  } catch (error) {
+    if (isCancellation(error)) throw error
+    // A keyframe-safe remux can still fail on an incompatible container stream.
+    // Remove its partial output and use the normal encode path transparently.
+    await rm(output, { force: true })
+    await encodeVideo(request, directory, output, duration, jobId)
+  }
+}
+
+function isCancellation(error: unknown): boolean {
+  return error instanceof Error && error.message.toLowerCase().includes('cancelled')
 }
 
 async function streamCopy(
@@ -275,11 +302,16 @@ async function streamCopy(
     lines.push(`outpoint ${seconds(segment.sourceEnd)}`)
   }
   await writeFile(concatFile, `${lines.join('\n')}\n`)
-  await jobs.run(ffmpegPath(), [
+  await jobs.run(ffmpegPath(), streamCopyArguments(concatFile, output), 'export', duration, request.outputPath, jobId)
+}
+
+export function streamCopyArguments(concatFile: string, output: string): string[] {
+  return [
     '-hide_banner', '-y', '-f', 'concat', '-safe', '0', '-i', concatFile,
-    '-map', '0', '-c', 'copy', '-avoid_negative_ts', 'make_zero', '-movflags', '+faststart',
+    '-map', '0:v:0', '-map', '0:a:0?', '-sn', '-dn', '-c', 'copy',
+    '-avoid_negative_ts', 'make_zero', '-movflags', '+faststart',
     '-progress', 'pipe:1', '-nostats', output
-  ], 'export', duration, request.outputPath, jobId)
+  ]
 }
 
 async function prepareInputs(request: ExportRequest, directory: string): Promise<{
@@ -329,7 +361,32 @@ async function encodeVideo(
   const graph = encoder.filterSuffix
     ? `${filter.graph};[${filter.videoLabel}]${encoder.filterSuffix}`
     : filter.graph
-  const args = [
+  const args = encoderArgs(encoder, inputArgs, filter, graph, duration, output)
+  try {
+    await jobs.run(encoder.executable, args, 'export', duration, request.outputPath, jobId)
+  } catch (error) {
+    if (!encoder.hardware || isCancellation(error)) throw error
+    // A short VAAPI probe cannot predict every real filter graph or driver
+    // failure, so software encoding is the reliability fallback for this job.
+    await rm(output, { force: true })
+    const fallback = softwareEncoder()
+    await jobs.run(
+      fallback.executable,
+      encoderArgs(fallback, inputArgs, filter, filter.graph, duration, output),
+      'export', duration, request.outputPath, jobId
+    )
+  }
+}
+
+function encoderArgs(
+  encoder: Awaited<ReturnType<typeof exportEncoder>>,
+  inputArgs: string[],
+  filter: ReturnType<typeof buildFilterGraph>,
+  graph: string,
+  duration: number,
+  output: string
+): string[] {
+  return [
     ...encoder.input, ...inputArgs,
     '-filter_complex_threads', '0', '-filter_complex', graph,
     '-map', `[${encoder.videoLabel(filter.videoLabel)}]`, '-map', `[${filter.audioLabel}]`,
@@ -337,5 +394,4 @@ async function encodeVideo(
     '-c:a', 'aac', '-b:a', '256k', '-movflags', '+faststart',
     '-progress', 'pipe:1', '-nostats', output
   ]
-  await jobs.run(encoder.executable, args, 'export', duration, request.outputPath, jobId)
 }

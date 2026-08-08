@@ -1,14 +1,14 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { ExportRequest, Overlay } from '../src/types'
 
-vi.mock('electron', () => ({ nativeImage: { createFromPath: vi.fn() } }))
 vi.mock('../../src/main/binaries', () => ({ ffmpegPath: () => '/ffmpeg', ffprobePath: () => '/ffprobe' }))
 vi.mock('../../src/main/jobs', () => ({ jobs: { run: vi.fn() } }))
 
 let buildFilterGraph: typeof import('../src/main/exporter').buildFilterGraph
+let streamCopyArguments: typeof import('../src/main/exporter').streamCopyArguments
 
 beforeAll(async () => {
-  ;({ buildFilterGraph } = await import('../src/main/exporter'))
+  ;({ buildFilterGraph, streamCopyArguments } = await import('../src/main/exporter'))
 })
 
 describe('FFmpeg export graph', () => {
@@ -17,16 +17,16 @@ describe('FFmpeg export graph', () => {
       {
         id: 'v', type: 'video', name: 'meme', path: '/meme.mp4', start: 1, duration: 2,
         zIndex: 1, x: 0, y: 0, width: 1, height: 1, opacity: 1, loop: true,
-        audioEnabled: true, hasAudio: true, volume: 1, sourceDuration: 2
+        audioEnabled: true, hasAudio: true, volume: 1, sourceIn: 0.5, sourceDuration: 2
       },
       {
         id: 'a', type: 'audio', name: 'sound', path: '/sound.wav', start: 2, duration: 1,
-        zIndex: 2, volume: 0.8, sourceDuration: 1
+        zIndex: 2, volume: 0.8, sourceIn: 0.25, sourceDuration: 1
       }
     ]
     const request: ExportRequest = {
       source: {
-        path: '/source.mp4', name: 'source.mp4', size: 100, duration: 10,
+        path: '/source.mp4', name: 'source.mp4', size: 100, modifiedAt: 1, duration: 10,
         width: 1280, height: 720, fps: 30, videoCodec: 'h264', audioCodec: 'aac',
         hasAudio: true, rotation: 0, pixelFormat: 'yuv420p'
       },
@@ -43,6 +43,8 @@ describe('FFmpeg export graph', () => {
     expect(result.graph).toContain('concat=n=2:v=1:a=0')
     expect(result.graph).toContain('overlay=x=0:y=0')
     expect(result.graph).toContain('amix=inputs=3')
+    expect(result.graph).toContain('trim=start=0.500000:end=2.500000')
+    expect(result.graph).toContain('atrim=start=0.250000:end=1.250000')
     expect(result.graph).toContain('alimiter=limit=0.95')
     expect(result.videoLabel).toBe('vout0')
   })
@@ -50,12 +52,48 @@ describe('FFmpeg export graph', () => {
   it('creates silence for a source without audio', () => {
     const request: ExportRequest = {
       source: {
-        path: '/silent.mp4', name: 'silent.mp4', size: 10, duration: 3,
+        path: '/silent.mp4', name: 'silent.mp4', size: 10, modifiedAt: 1, duration: 3,
         width: 320, height: 180, fps: 24, videoCodec: 'h264', audioCodec: null,
         hasAudio: false, rotation: 0, pixelFormat: 'yuv420p'
       },
       outputPath: '/output.mp4', segments: [{ id: 's', sourceStart: 0, sourceEnd: 3 }], overlays: []
     }
     expect(buildFilterGraph(request, []).graph).toContain('anullsrc=channel_layout=stereo')
+  })
+
+  it('centers contained media and applies text opacity exactly once', () => {
+    const overlays: Overlay[] = [
+      {
+        id: 'text', type: 'text', name: 'Title', start: 0, duration: 2, zIndex: 1,
+        x: 0.1, y: 0.1, width: 0.8, height: 0.2, opacity: 0.5, text: 'Hello',
+        fontFamily: 'Anton', fontSize: 7, color: '#fff', outlineColor: '#000',
+        outlineWidth: 2, shadow: false, align: 'center'
+      },
+      {
+        id: 'image', type: 'image', name: 'Picture', path: '/picture.png',
+        start: 0, duration: 2, zIndex: 2, x: 0.25, y: 0.25,
+        width: 0.5, height: 0.5, opacity: 1, loop: false
+      }
+    ]
+    const request: ExportRequest = {
+      source: {
+        path: '/source.mp4', name: 'source.mp4', size: 100, modifiedAt: 1, duration: 2,
+        width: 1280, height: 720, fps: 60, videoCodec: 'h264', audioCodec: null,
+        hasAudio: false, rotation: 0, pixelFormat: 'yuv420p'
+      },
+      outputPath: '/output.mp4',
+      segments: [{ id: 'source', sourceStart: 0, sourceEnd: 2 }],
+      overlays
+    }
+    const graph = buildFilterGraph(request, overlays.map((overlay, offset) => ({ overlay, index: offset + 1 }))).graph
+    expect(graph.match(/colorchannelmixer=aa=0\.5/g)).toHaveLength(1)
+    expect(graph).toContain('pad=640:360:(ow-iw)/2:(oh-ih)/2:color=black@0')
+    expect(graph).toContain('overlay=x=320:y=180')
+  })
+
+  it('maps only MP4-compatible primary streams during lossless remuxing', () => {
+    const args = streamCopyArguments('/tmp/segments.ffconcat', '/tmp/output.mp4')
+    expect(args).toEqual(expect.arrayContaining(['0:v:0', '0:a:0?', '-sn', '-dn']))
+    expect(args.some((argument, index) => argument === '0' && args[index - 1] === '-map')).toBe(false)
   })
 })

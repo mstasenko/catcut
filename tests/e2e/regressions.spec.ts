@@ -14,10 +14,14 @@ function temporaryDirectory(prefix: string): string {
   return directory
 }
 
-async function launch(input: string, output?: string): Promise<ElectronApplication> {
+async function launch(
+  input: string,
+  output?: string,
+  overrides: NodeJS.ProcessEnv = {}
+): Promise<ElectronApplication> {
   const app = await electron.launch({
     args: [main, input],
-    env: e2eEnvironment(output ? { CATCUT_E2E_OUTPUT: output } : {})
+    env: e2eEnvironment({ ...(output ? { CATCUT_E2E_OUTPUT: output } : {}), ...overrides })
   })
   applications.push(app)
   await dismissHardwareWarningIfNeeded(await app.firstWindow())
@@ -206,6 +210,74 @@ test('renders added text into the exported video', async () => {
     '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1'
   ])
   expect(frame.some((value) => value > 100)).toBe(true)
+})
+
+test('renders SVG library images into the exported video', async () => {
+  const directory = temporaryDirectory('catcut-svg-')
+  const input = makeVideo(directory)
+  const output = join(directory, 'output.mp4')
+  const app = await launch(input, output)
+  const window = await app.firstWindow()
+  await expect(window.getByText('black.mp4', { exact: true })).toBeVisible()
+  await click(window.getByRole('button', { name: 'Images', exact: true }))
+  await click(window.getByRole('button', { name: 'Awesome Face', exact: true }))
+  await click(window.getByRole('button', { name: 'Export video' }))
+  await expect(window.getByRole('dialog', { name: 'Exporting video' })).toBeVisible()
+  await expect(window.getByRole('button', { name: 'Export video' })).toBeEnabled({ timeout: 30_000 })
+  await expect.poll(() => existsSync(output), { timeout: 30_000 }).toBe(true)
+  const frame = execFileSync(ffmpeg, [
+    '-hide_banner', '-loglevel', 'error', '-ss', '1', '-i', output,
+    '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1'
+  ])
+  expect(frame.some((value) => value > 150)).toBe(true)
+})
+
+test('exports WebM video audio together with an OGG effect', async () => {
+  const directory = temporaryDirectory('catcut-media-export-')
+  const input = makeVideo(directory)
+  const output = join(directory, 'output.mp4')
+  const app = await launch(input, output)
+  const window = await app.firstWindow()
+  await click(window.getByRole('button', { name: 'Videos', exact: true }))
+  await click(window.getByRole('button', { name: 'Scary Maze Reaction', exact: true }))
+  // Native checkbox actionability is flaky in the headless GNOME runner; use
+  // the suite's CI-safe click helper, just like the other controls here.
+  await click(window.getByRole('checkbox', { name: 'Include audio' }))
+  await click(window.getByRole('button', { name: '← Back' }))
+  await click(window.getByRole('button', { name: '← Back' }))
+  await click(window.getByRole('button', { name: 'Audio', exact: true }))
+  await click(window.getByRole('button', { name: 'Wilhelm Scream', exact: true }))
+  await click(window.getByRole('button', { name: 'Export video' }))
+  await expect(window.getByRole('dialog', { name: 'Exporting video' })).toBeVisible()
+  await expect(window.getByRole('button', { name: 'Export video' })).toBeEnabled({ timeout: 30_000 })
+  await expect.poll(() => existsSync(output), { timeout: 30_000 }).toBe(true)
+  expect(() => execFileSync(ffmpeg, [
+    '-hide_banner', '-loglevel', 'error', '-i', output,
+    '-map', '0:v:0', '-map', '0:a:0', '-t', '0.2', '-f', 'null', '-'
+  ])).not.toThrow()
+})
+
+test('prepares, previews, and exports an external GIF', async () => {
+  const directory = temporaryDirectory('catcut-gif-')
+  const input = makeVideo(directory)
+  const gif = join(directory, 'animated.gif')
+  const output = join(directory, 'output.mp4')
+  execFileSync(ffmpeg, [
+    '-hide_banner', '-loglevel', 'error', '-y',
+    '-f', 'lavfi', '-i', 'testsrc2=size=96x64:rate=10:duration=1', gif
+  ])
+  const app = await launch(input, output, { CATCUT_E2E_MEDIA: gif })
+  const window = await app.firstWindow()
+  await click(window.getByRole('button', { name: 'New', exact: true }))
+  await expect(window.getByRole('button', { name: 'animated', exact: true })).toBeVisible({ timeout: 15_000 })
+  const gifPreview = window.locator('.visual-overlay video')
+  await expect.poll(() => gifPreview.evaluate((video) => (video as HTMLVideoElement).readyState), {
+    timeout: 15_000
+  }).toBeGreaterThan(0)
+  await click(window.getByRole('button', { name: 'Export video' }))
+  await expect(window.getByRole('dialog', { name: 'Exporting video' })).toBeVisible()
+  await expect(window.getByRole('button', { name: 'Export video' })).toBeEnabled({ timeout: 30_000 })
+  await expect.poll(() => existsSync(output), { timeout: 30_000 }).toBe(true)
 })
 
 test('blocks editing and removes partial output when export is cancelled', async () => {

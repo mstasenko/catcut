@@ -9,6 +9,9 @@ interface TimelineProps {
   onSeek: (time: number) => void
   onSelectOverlay: (id: string) => void
   onOverlayChange: (id: string, patch: Partial<Overlay>) => void
+  onOverlayGestureStart: () => void
+  onOverlayGestureEnd: () => void
+  onOverlayGestureCancel: () => void
 }
 
 const colors: Record<Overlay['type'], string> = {
@@ -19,7 +22,10 @@ function percentage(value: number, duration: number): number {
   return duration > 0 ? value / duration * 100 : 0
 }
 
-export function Timeline({ session, zoom, onZoom, onSeek, onSelectOverlay, onOverlayChange }: TimelineProps): React.JSX.Element {
+export function Timeline({
+  session, zoom, onZoom, onSeek, onSelectOverlay, onOverlayChange,
+  onOverlayGestureStart, onOverlayGestureEnd, onOverlayGestureCancel
+}: TimelineProps): React.JSX.Element {
   const duration = timelineDuration(session.segments)
   const width = Math.max(100, zoom * 100)
   const selection = deletionRange(session)
@@ -75,17 +81,28 @@ export function Timeline({ session, zoom, onZoom, onSeek, onSelectOverlay, onOve
                   const originalStart = overlay.start
                   const track = event.currentTarget.parentElement?.parentElement
                   if (!track) return
+                  onOverlayGestureStart()
                   const rectangle = track.getBoundingClientRect()
                   const move = (moveEvent: PointerEvent): void => {
                     const delta = (moveEvent.clientX - startX) / rectangle.width * duration
                     onOverlayChange(overlay.id, { start: Math.max(0, Math.min(duration - overlay.duration, originalStart + delta)) })
                   }
-                  const up = (): void => {
+                  const cleanup = (): void => {
                     window.removeEventListener('pointermove', move)
                     window.removeEventListener('pointerup', up)
+                    window.removeEventListener('pointercancel', cancel)
+                  }
+                  const up = (): void => {
+                    cleanup()
+                    onOverlayGestureEnd()
+                  }
+                  const cancel = (): void => {
+                    cleanup()
+                    onOverlayGestureCancel()
                   }
                   window.addEventListener('pointermove', move)
                   window.addEventListener('pointerup', up)
+                  window.addEventListener('pointercancel', cancel)
                 }}
                 title={overlay.name}
               >

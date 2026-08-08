@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { mkdir, stat } from 'node:fs/promises'
+import { mkdir, readdir, rename, rm, stat } from 'node:fs/promises'
 import { basename, extname, join } from 'node:path'
 import { promisify } from 'node:util'
 import { app } from 'electron'
@@ -67,25 +67,42 @@ function rotationOf(video: ProbeStream): number {
   return firstNumber(sideData?.rotation, video.tags?.rotate)
 }
 
+export function displayDimensions(width: number, height: number, rotation: number): {
+  width: number
+  height: number
+  rotation: number
+} {
+  const normalized = ((Math.round(rotation) % 360) + 360) % 360
+  return normalized === 90 || normalized === 270
+    ? { width: height, height: width, rotation: normalized }
+    : { width, height, rotation: normalized }
+}
+
 export async function probeMedia(path: string): Promise<MediaMetadata> {
   const result = await readProbe(path)
   const video = stream(result, 'video')
   if (!video) throw new Error('This file is not a video.')
   const audio = stream(result, 'audio')
   const fileStat = await stat(path)
+  const dimensions = displayDimensions(
+    firstNumber(video.width),
+    firstNumber(video.height),
+    rotationOf(video)
+  )
 
   return {
     path,
     name: basename(path),
     size: firstNumber(result.format.size, fileStat.size),
+    modifiedAt: fileStat.mtimeMs,
     duration: firstNumber(result.format.duration, video.duration),
-    width: firstNumber(video.width),
-    height: firstNumber(video.height),
+    width: dimensions.width,
+    height: dimensions.height,
     fps: parseRate(firstText(video.avg_frame_rate, video.r_frame_rate)),
     videoCodec: textOr(video.codec_name, 'unknown'),
     audioCodec: audio ? textOr(audio.codec_name, 'unknown') : null,
     hasAudio: Boolean(audio),
-    rotation: rotationOf(video),
+    rotation: dimensions.rotation,
     pixelFormat: textOr(video.pix_fmt, 'unknown')
   }
 }
@@ -111,11 +128,43 @@ export function mediaNeedsProxy(metadata: MediaMetadata): boolean {
     || !browserCodecs.has(metadata.videoCodec)
 }
 
-function cacheKey(metadata: MediaMetadata): string {
+export function proxyCacheKey(metadata: MediaMetadata): string {
   return createHash('sha256')
-    .update(`${metadata.path}\0${metadata.size}\0${metadata.duration}`)
+    .update(`${metadata.path}\0${metadata.size}\0${metadata.modifiedAt}\0${metadata.duration}`)
     .digest('hex')
     .slice(0, 24)
+}
+
+async function validProxy(path: string): Promise<boolean> {
+  try {
+    const [file, probe] = await Promise.all([stat(path), readProbe(path)])
+    return file.size > 1024 && Boolean(stream(probe, 'video')) && firstNumber(probe.format.duration) > 0
+  } catch {
+    return false
+  }
+}
+
+export async function pruneProxyCache(
+  directory: string,
+  maximumBytes = 10 * 1024 ** 3,
+  preservedPath?: string
+): Promise<void> {
+  const entries = await readdir(directory, { withFileTypes: true })
+  const files = (await Promise.all(entries
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.mp4'))
+    .map(async (entry) => {
+      const path = join(directory, entry.name)
+      const details = await stat(path)
+      return { path, size: details.size, modifiedAt: details.mtimeMs }
+    })))
+    .sort((left, right) => left.modifiedAt - right.modifiedAt)
+  let total = files.reduce((sum, file) => sum + file.size, 0)
+  for (const file of files) {
+    if (total <= maximumBytes) break
+    if (file.path === preservedPath) continue
+    await rm(file.path, { force: true })
+    total -= file.size
+  }
 }
 
 export async function createProxy(metadata: MediaMetadata): Promise<{
@@ -125,21 +174,25 @@ export async function createProxy(metadata: MediaMetadata): Promise<{
   const cacheRoot = process.env.XDG_CACHE_HOME ?? join(app.getPath('home'), '.cache')
   const cacheDirectory = join(cacheRoot, 'catcut', 'proxies')
   await mkdir(cacheDirectory, { recursive: true })
-  const outputPath = join(cacheDirectory, `${cacheKey(metadata)}.mp4`)
-  try {
-    const existing = await stat(outputPath)
-    if (existing.size > 1024) return { jobId: `cache-${cacheKey(metadata)}`, result: { path: outputPath, cacheHit: true } }
-  } catch {
-    // A missing or incomplete proxy is regenerated.
+  const key = proxyCacheKey(metadata)
+  const outputPath = join(cacheDirectory, `${key}.mp4`)
+  if (await validProxy(outputPath)) {
+    return { jobId: `cache-${key}`, result: { path: outputPath, cacheHit: true } }
   }
+  await rm(outputPath, { force: true })
 
   const jobId = randomUUID()
+  const temporaryPath = join(cacheDirectory, `.${key}.${jobId}.partial.mp4`)
   const frameRate = metadata.fps > 0 ? Math.max(24, Math.round(metadata.fps)) : 30
   const args = [
     '-hide_banner',
     '-y',
     '-i',
     metadata.path,
+    '-map',
+    '0:v:0',
+    '-map',
+    '0:a:0?',
     '-vf',
     "scale='min(1280,iw)':-2",
     '-c:v',
@@ -161,10 +214,19 @@ export async function createProxy(metadata: MediaMetadata): Promise<{
     '-progress',
     'pipe:1',
     '-nostats',
-    outputPath
+    temporaryPath
   ]
-  await jobs.run(ffmpegPath(), args, 'proxy', metadata.duration, outputPath, jobId)
-  return { jobId, result: { path: outputPath, cacheHit: false } }
+  try {
+    await jobs.run(ffmpegPath(), args, 'proxy', metadata.duration, outputPath, jobId)
+    // Never expose the cache filename until FFprobe accepts the completed temp
+    // file. Rename on the same filesystem makes the cache update atomic.
+    if (!await validProxy(temporaryPath)) throw new Error('The generated playback proxy is invalid')
+    await rename(temporaryPath, outputPath)
+    await pruneProxyCache(cacheDirectory, 10 * 1024 ** 3, outputPath)
+    return { jobId, result: { path: outputPath, cacheHit: false } }
+  } finally {
+    await rm(temporaryPath, { force: true })
+  }
 }
 
 export function defaultExportName(sourceName: string): string {

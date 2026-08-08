@@ -3,7 +3,7 @@ import type { CatCutApi, MediaMetadata } from '@shared/types'
 import { isVideoOverlay, selectedOverlay, useEditorStore } from './store'
 
 const metadata: MediaMetadata = {
-  path: '/source.mp4', name: 'source.mp4', size: 100, duration: 10,
+  path: '/source.mp4', name: 'source.mp4', size: 100, modifiedAt: 1, duration: 10,
   width: 1280, height: 720, fps: 30, videoCodec: 'h264', audioCodec: 'aac',
   hasAudio: true, rotation: 0, pixelFormat: 'yuv420p'
 }
@@ -23,7 +23,8 @@ function api(): CatCutApi {
     cancelJob: vi.fn().mockResolvedValue(true),
     getGpuDiagnostics: vi.fn().mockResolvedValue({ sessionType: 'wayland', desktop: 'GNOME', waylandDisplay: 'wayland-0', hardwareAcceleration: true, videoDecode: 'enabled', gpuCompositing: 'enabled', gpuName: 'Intel' }),
     getPathUrl: vi.fn((path: string) => Promise.resolve(`catcut:${path}`)),
-    getDroppedPath: vi.fn(() => '/drop.mp4'),
+    getSvgDataUrl: vi.fn((path: string) => Promise.resolve(`data:image/svg+xml,${path}`)),
+    getDroppedPath: vi.fn().mockResolvedValue('/drop.mp4'),
     onOpenPath: vi.fn(() => () => undefined),
     onJobProgress: vi.fn(() => () => undefined)
   }
@@ -32,7 +33,7 @@ function api(): CatCutApi {
 beforeEach(() => {
   Object.defineProperty(window, 'catcut', { value: api(), configurable: true })
   useEditorStore.setState({
-    initialized: false, session: null, history: [], future: [], assets: [],
+    initialized: false, session: null, history: [], future: [], gesture: null, assets: [],
     gpu: null, job: null, busy: null, error: null
   })
 })
@@ -81,6 +82,43 @@ describe('editor store', () => {
     expect(useEditorStore.getState().session?.overlays).toHaveLength(1)
   })
 
+  it('records a drag as one undoable history transaction', async () => {
+    await useEditorStore.getState().loadVideo('/source.mp4')
+    useEditorStore.getState().addText()
+    const overlay = useEditorStore.getState().session?.overlays[0]
+    if (!overlay) throw new Error('missing overlay')
+    const historyBefore = useEditorStore.getState().history.length
+    useEditorStore.getState().beginOverlayGesture()
+    for (let x = 0.2; x <= 0.5; x += 0.1) {
+      useEditorStore.getState().updateOverlayGesture(overlay.id, { x })
+    }
+    useEditorStore.getState().commitOverlayGesture()
+    expect(useEditorStore.getState().history).toHaveLength(historyBefore + 1)
+    expect(useEditorStore.getState().session?.overlays[0]).toMatchObject({ x: 0.5 })
+    useEditorStore.getState().undo()
+    expect(useEditorStore.getState().session?.overlays[0]).toMatchObject({ x: 0.15 })
+  })
+
+  it('cancels gesture previews and ignores empty transactions', async () => {
+    const empty = useEditorStore.getState()
+    empty.beginOverlayGesture()
+    empty.updateOverlayGesture('missing', { start: 2 })
+    empty.commitOverlayGesture()
+    empty.cancelOverlayGesture()
+    await empty.loadVideo('/source.mp4')
+    useEditorStore.getState().addText()
+    const overlay = useEditorStore.getState().session?.overlays[0]
+    if (!overlay) throw new Error('missing overlay')
+    const historyBefore = useEditorStore.getState().history.length
+    useEditorStore.getState().beginOverlayGesture()
+    useEditorStore.getState().commitOverlayGesture()
+    expect(useEditorStore.getState().history).toHaveLength(historyBefore)
+    useEditorStore.getState().beginOverlayGesture()
+    useEditorStore.getState().updateOverlayGesture(overlay.id, { x: 0.7 })
+    useEditorStore.getState().cancelOverlayGesture()
+    expect(useEditorStore.getState().session?.overlays[0]).toMatchObject({ x: 0.15 })
+  })
+
   it('switches to an automatically generated proxy', async () => {
     vi.mocked(window.catcut.shouldProxy).mockResolvedValue(true)
     await useEditorStore.getState().loadVideo('/source.mp4')
@@ -120,9 +158,13 @@ describe('editor store', () => {
     expect(useEditorStore.getState().session?.cutPoints).toEqual([])
     await useEditorStore.getState().setPlaybackPath('/manual-proxy.mp4')
     expect(useEditorStore.getState().session?.playbackPath).toBe('catcut:/manual-proxy.mp4')
+    vi.mocked(window.catcut.probeAsset)
+      .mockResolvedValueOnce({ duration: 2, width: 320, height: 180, hasAudio: false })
+      .mockResolvedValueOnce({ duration: 2, width: 320, height: 180, hasAudio: false, playbackPath: '/gif-preview.mp4' })
     await useEditorStore.getState().addAsset({ id: 'i', type: 'image', name: 'Image', path: '/image.png', source: 'external' })
     await useEditorStore.getState().addAsset({ id: 'g', type: 'gif', name: 'GIF', path: '/image.gif', source: 'external' })
     expect(useEditorStore.getState().session?.overlays.map((item) => item.type)).toEqual(['image', 'gif'])
+    expect(useEditorStore.getState().session?.overlays[1]).toMatchObject({ playbackPath: '/gif-preview.mp4' })
     const current = selectedOverlay(useEditorStore.getState().session)
     expect(current?.type).toBe('gif')
     expect(isVideoOverlay(current)).toBe(false)
@@ -145,7 +187,7 @@ describe('editor store', () => {
     expect(isVideoOverlay({
       id: 'v', type: 'video', name: 'v', path: '/v', start: 0, duration: 1, zIndex: 1,
       x: 0, y: 0, width: 1, height: 1, opacity: 1, loop: false,
-      audioEnabled: false, hasAudio: false, volume: 1, sourceDuration: 1
+      audioEnabled: false, hasAudio: false, volume: 1, sourceIn: 0, sourceDuration: 1
     })).toBe(true)
   })
 

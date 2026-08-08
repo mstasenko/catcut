@@ -15,6 +15,8 @@ describe('media library names', () => {
     expect(categoryFor('picture.jpg')).toBe('image')
     expect(categoryFor('reaction.gif')).toBe('gif')
     expect(categoryFor('clip.webm')).toBe('video')
+    expect(categoryFor('phone.m4v')).toBe('video')
+    expect(categoryFor('legacy.avi')).toBe('video')
     expect(categoryFor('effect.ogg')).toBe('audio')
     expect(categoryFor('notes.txt')).toBeNull()
   })

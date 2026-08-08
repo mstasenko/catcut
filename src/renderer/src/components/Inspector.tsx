@@ -6,6 +6,7 @@ const fonts = ['Anton', 'Bangers', 'Bebas Neue', 'Comic Neue', 'Lobster', 'Oswal
 interface InspectorProps {
   overlay: Overlay | null
   maxDuration: number
+  framesPerSecond: number
   onBack: () => void
   onChange: (patch: Partial<Overlay>) => void
   onRemove: () => void
@@ -62,20 +63,22 @@ function VideoControls({ overlay, onChange }: Pick<InspectorProps, 'onChange'> &
   )
 }
 
-function DurationControl({ overlay, maxDuration, onChange }: Pick<InspectorProps, 'maxDuration' | 'onChange'> & { overlay: Overlay }): React.JSX.Element {
+function DurationControl({
+  overlay, maxDuration, framesPerSecond, onChange
+}: Pick<InspectorProps, 'maxDuration' | 'framesPerSecond' | 'onChange'> & { overlay: Overlay }): React.JSX.Element {
   if (overlay.type === 'audio' || overlay.type === 'video' || overlay.type === 'gif') {
-    return <div className="control-row"><span>Length</span><output>{formatTime(overlay.duration)}</output></div>
+    return <div className="control-row"><span>Length</span><output>{formatTime(overlay.duration, framesPerSecond)}</output></div>
   }
   return <NumberControl label="Visible for" value={overlay.duration} min={0.1} max={maxDuration} step={0.05} onChange={(duration) => onChange({ duration })} />
 }
 
-export function Inspector({ overlay, maxDuration, onBack, onChange, onRemove }: InspectorProps): React.JSX.Element {
+export function Inspector({ overlay, maxDuration, framesPerSecond, onBack, onChange, onRemove }: InspectorProps): React.JSX.Element {
   if (!overlay) return <section className="inspector"><p className="empty-note">Select text, a picture, or a clip to edit it.</p></section>
   return (
     <section className="inspector">
       <div className="panel-heading"><button onClick={onBack}>← Back</button><strong>{overlay.name}</strong></div>
       <NumberControl label={overlay.type === 'audio' ? 'Starts at' : 'Appears at'} value={overlay.start} min={0} max={maxDuration} step={0.05} onChange={(start) => onChange({ start })} />
-      <DurationControl overlay={overlay} maxDuration={maxDuration} onChange={onChange} />
+      <DurationControl overlay={overlay} maxDuration={maxDuration} framesPerSecond={framesPerSecond} onChange={onChange} />
       <TextControls overlay={overlay} onChange={onChange} />
       <VisualControls overlay={overlay} onChange={onChange} />
       <AudioControls overlay={overlay} onChange={onChange} />

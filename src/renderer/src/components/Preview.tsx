@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { EditSession, Overlay, VisualOverlayBase } from '@shared/types'
 import {
   formatTime,
+  overlaySourceTime,
   outputTimeForSource,
   overlayAtTime,
   positionAtOutputTime,
@@ -20,6 +21,9 @@ interface PreviewProps {
   onPlayhead: (time: number) => void
   onSelect: (id: string | null) => void
   onOverlayChange: (id: string, patch: Partial<Overlay>) => void
+  onOverlayGestureStart: () => void
+  onOverlayGestureEnd: () => void
+  onOverlayGestureCancel: () => void
   onSelectPoint: () => void
   onDeleteSelection: () => void
   onUndo: () => void
@@ -45,7 +49,7 @@ function TransportControls({ props, total }: { props: PreviewProps; total: numbe
       <button disabled={!props.canUndo} onClick={props.onUndo} aria-label="Undo" title="Undo (Ctrl+Z)">↶</button>
       <button disabled={!props.canRedo} onClick={props.onRedo} aria-label="Redo" title="Redo (Ctrl+Shift+Z)">↷</button>
       <span className="timeline-title">Timeline</span>
-      <span className="timeline-time">{formatTime(props.session.playhead)} / {formatTime(total)}</span>
+      <span className="timeline-time">{formatTime(props.session.playhead, props.session.source.fps)} / {formatTime(total, props.session.source.fps)}</span>
       <button disabled={props.zoom <= 1} onClick={() => props.onZoom(Math.max(1, props.zoom - 0.25))} aria-label="Zoom out">−</button>
       <button disabled={props.zoom >= 8} onClick={() => props.onZoom(Math.min(8, props.zoom + 0.25))} aria-label="Zoom in">+</button>
     </div>
@@ -77,7 +81,7 @@ function OverlayContent({ overlay, playhead, playing }: {
 
   useEffect(() => {
     const media = mediaRef.current
-    if (!media || !isTimedOverlay(overlay)) return
+    if (!media || !isPlayableOverlay(overlay)) return
     syncOverlayMedia(media, overlay, playhead, playing, mediaVolume)
   }, [overlay, mediaVolume, playhead, playing])
 
@@ -91,15 +95,15 @@ function OverlayContent({ overlay, playhead, playing }: {
       </div>
     )
   }
-  if (overlay.type === 'image' || overlay.type === 'gif') {
+  if (overlay.type === 'image') {
     return <img src={url} alt={overlay.name} draggable={false} />
   }
-  if (overlay.type === 'video') {
+  if (isVideoElementOverlay(overlay)) {
     return (
       <video
         ref={mediaRef as React.RefObject<HTMLVideoElement>}
         src={url}
-        muted={!overlay.audioEnabled}
+        muted={overlay.type === 'gif' || !overlay.audioEnabled}
         loop={overlay.loop}
         playsInline
       />
@@ -108,12 +112,21 @@ function OverlayContent({ overlay, playhead, playing }: {
   return <audio ref={mediaRef as React.RefObject<HTMLAudioElement>} src={url} />
 }
 
+function isVideoElementOverlay(overlay: Overlay): overlay is Extract<Overlay, { type: 'video' | 'gif' }> {
+  return overlay.type === 'video' || overlay.type === 'gif'
+}
+
 function overlayPath(overlay: Overlay): string | undefined {
-  return overlay.type === 'text' ? undefined : overlay.path
+  if (overlay.type === 'text') return undefined
+  return overlay.type === 'gif' ? overlay.playbackPath ?? overlay.path : overlay.path
 }
 
 function overlayVolume(overlay: Overlay): number {
-  return isTimedOverlay(overlay) ? overlay.volume : 1
+  return overlay.type === 'video' || overlay.type === 'audio' ? overlay.volume : 1
+}
+
+function isPlayableOverlay(overlay: Overlay): overlay is Extract<Overlay, { type: 'video' | 'audio' | 'gif' }> {
+  return overlay.type === 'video' || overlay.type === 'audio' || overlay.type === 'gif'
 }
 
 function textStyle(overlay: Extract<Overlay, { type: 'text' }>): React.CSSProperties {
@@ -127,29 +140,20 @@ function textStyle(overlay: Extract<Overlay, { type: 'text' }>): React.CSSProper
   }
 }
 
-function isTimedOverlay(overlay: Overlay): overlay is Extract<Overlay, { type: 'video' | 'audio' }> {
-  return overlay.type === 'video' || overlay.type === 'audio'
-}
-
 function playableDuration(media: HTMLMediaElement, overlay: Overlay): number {
   return Number.isFinite(media.duration) && media.duration > 0 ? media.duration : overlay.duration
 }
 
-function overlayMediaTime(overlay: Extract<Overlay, { type: 'video' | 'audio' }>, playhead: number, duration: number): number {
-  const elapsed = Math.max(0, playhead - overlay.start)
-  return overlay.type === 'video' && overlay.loop ? elapsed % duration : elapsed
-}
-
 function syncOverlayMedia(
   media: HTMLMediaElement,
-  overlay: Extract<Overlay, { type: 'video' | 'audio' }>,
+  overlay: Extract<Overlay, { type: 'video' | 'audio' | 'gif' }>,
   playhead: number,
   playing: boolean,
   volume: number
 ): void {
   media.volume = volume
   const duration = playableDuration(media, overlay)
-  const expected = overlayMediaTime(overlay, playhead, duration)
+  const expected = overlaySourceTime(overlay, playhead)
   if (Math.abs(media.currentTime - expected) > 0.2) media.currentTime = Math.min(expected, duration)
   if (playing) void media.play().catch(() => undefined)
   else media.pause()
@@ -200,12 +204,18 @@ function updatePlayback(
   onPlayingChange(false)
 }
 
-function VisualItem({ overlay, children, selected, onSelect, onChange, bounds }: {
+function VisualItem({
+  overlay, children, selected, onSelect, onChange,
+  onGestureStart, onGestureEnd, onGestureCancel, bounds
+}: {
   overlay: VisualOverlayBase
   children: React.ReactNode
   selected: boolean
   onSelect: () => void
   onChange: (patch: Partial<Overlay>) => void
+  onGestureStart: () => void
+  onGestureEnd: () => void
+  onGestureCancel: () => void
   bounds: React.RefObject<HTMLDivElement | null>
 }): React.JSX.Element {
   const drag = useRef<{ x: number; y: number; startX: number; startY: number } | null>(null)
@@ -238,6 +248,7 @@ function VisualItem({ overlay, children, selected, onSelect, onChange, bounds }:
       }}
       onPointerDown={(event) => {
         onSelect()
+        onGestureStart()
         drag.current = { x: overlay.x, y: overlay.y, startX: event.clientX, startY: event.clientY }
         event.currentTarget.setPointerCapture(event.pointerId)
       }}
@@ -246,6 +257,12 @@ function VisualItem({ overlay, children, selected, onSelect, onChange, bounds }:
         drag.current = null
         resize.current = null
         event.currentTarget.releasePointerCapture(event.pointerId)
+        onGestureEnd()
+      }}
+      onPointerCancel={() => {
+        drag.current = null
+        resize.current = null
+        onGestureCancel()
       }}
     >
       {children}
@@ -255,6 +272,7 @@ function VisualItem({ overlay, children, selected, onSelect, onChange, bounds }:
           aria-label="Resize overlay"
           onPointerDown={(event) => {
             event.stopPropagation()
+            onGestureStart()
             resize.current = { x: event.clientX, y: event.clientY, width: overlay.width, height: overlay.height }
             event.currentTarget.parentElement?.setPointerCapture(event.pointerId)
           }}
@@ -338,6 +356,9 @@ export function Preview(props: PreviewProps): React.JSX.Element {
               selected={props.session.selectedOverlayId === overlay.id}
               onSelect={() => props.onSelect(overlay.id)}
               onChange={(patch) => props.onOverlayChange(overlay.id, patch)}
+              onGestureStart={props.onOverlayGestureStart}
+              onGestureEnd={props.onOverlayGestureEnd}
+              onGestureCancel={props.onOverlayGestureCancel}
               bounds={stageRef}
             >
               <OverlayContent overlay={overlay} playhead={props.session.playhead} playing={props.playing} />

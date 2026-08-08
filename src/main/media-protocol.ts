@@ -59,6 +59,12 @@ export function byteRange(header: string | null, size: number): ByteRange | null
   return parsedRange(match, size)
 }
 
+function accessError(request: Request, path: string, canRead: (path: string) => boolean): Response | null {
+  if (!canRead(path)) return new Response(null, { status: 403 })
+  if (request.method === 'GET' || request.method === 'HEAD') return null
+  return new Response(null, { status: 405, headers: { Allow: 'GET, HEAD' } })
+}
+
 function headersFor(path: string, size: number, range: ByteRange): Headers {
   const headers = new Headers({
     'Accept-Ranges': 'bytes',
@@ -71,8 +77,13 @@ function headersFor(path: string, size: number, range: ByteRange): Headers {
   return headers
 }
 
-export async function mediaResponse(request: Request): Promise<Response> {
+export async function mediaResponse(
+  request: Request,
+  canRead: (path: string) => boolean
+): Promise<Response> {
   const path = decodeMediaUrl(request.url)
+  const denied = accessError(request, path, canRead)
+  if (denied) return denied
   const size = (await stat(path)).size
   const rangeHeader = request.headers.get('range')
   const range = byteRange(rangeHeader, size)

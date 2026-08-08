@@ -4,6 +4,7 @@ export interface MediaMetadata {
   path: string
   name: string
   size: number
+  modifiedAt: number
   duration: number
   width: number
   height: number
@@ -20,6 +21,7 @@ export interface AssetMetadata {
   width: number
   height: number
   hasAudio: boolean
+  playbackPath?: string
 }
 
 export interface SourceSegment {
@@ -59,10 +61,19 @@ export interface TextOverlay extends VisualOverlayBase {
 }
 
 export interface ImageOverlay extends VisualOverlayBase {
-  type: 'image' | 'gif'
+  type: 'image'
   path: string
   loop: boolean
-  sourceDuration?: number
+  renderedImageDataUrl?: string
+}
+
+export interface GifOverlay extends VisualOverlayBase {
+  type: 'gif'
+  path: string
+  playbackPath?: string
+  loop: boolean
+  sourceIn: number
+  sourceDuration: number
 }
 
 export interface VideoOverlay extends VisualOverlayBase {
@@ -72,6 +83,7 @@ export interface VideoOverlay extends VisualOverlayBase {
   audioEnabled: boolean
   hasAudio: boolean
   volume: number
+  sourceIn: number
   sourceDuration: number
 }
 
@@ -79,10 +91,11 @@ export interface AudioOverlay extends OverlayBase {
   type: 'audio'
   path: string
   volume: number
+  sourceIn: number
   sourceDuration: number
 }
 
-export type Overlay = TextOverlay | ImageOverlay | VideoOverlay | AudioOverlay
+export type Overlay = TextOverlay | ImageOverlay | GifOverlay | VideoOverlay | AudioOverlay
 
 export interface EditSession {
   source: MediaMetadata
@@ -160,7 +173,8 @@ export interface CatCutApi {
   cancelJob: (id: string) => Promise<boolean>
   getGpuDiagnostics: () => Promise<GpuDiagnostics>
   getPathUrl: (path: string) => Promise<string>
-  getDroppedPath: (file: File) => string
+  getSvgDataUrl: (path: string) => Promise<string>
+  getDroppedPath: (file: File) => Promise<string>
   onOpenPath: (callback: (path: string) => void) => () => void
   onJobProgress: (callback: (progress: JobProgress) => void) => () => void
 }

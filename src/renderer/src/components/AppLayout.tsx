@@ -97,6 +97,7 @@ function SidePanel({ store, selected, duration, exporting, onExport }: {
             <Inspector
               overlay={selected}
               maxDuration={duration}
+              framesPerSecond={store.session?.source.fps ?? 30}
               onBack={() => store.selectOverlay(null)}
               onChange={(patch) => store.updateOverlay(selected.id, patch)}
               onRemove={store.removeSelectedOverlay}
@@ -155,7 +156,10 @@ export function EditorWorkspace({
           onZoom={onZoom}
           onPlayhead={store.setPlayhead}
           onSelect={store.selectOverlay}
-          onOverlayChange={store.updateOverlay}
+          onOverlayChange={store.updateOverlayGesture}
+          onOverlayGestureStart={store.beginOverlayGesture}
+          onOverlayGestureEnd={store.commitOverlayGesture}
+          onOverlayGestureCancel={store.cancelOverlayGesture}
           onSelectPoint={store.selectPoint}
           onDeleteSelection={store.deleteSelection}
           onUndo={store.undo}
@@ -167,7 +171,10 @@ export function EditorWorkspace({
           onZoom={onZoom}
           onSeek={(time) => { onPlayingChange(false); store.setPlayhead(time) }}
           onSelectOverlay={store.selectOverlay}
-          onOverlayChange={store.updateOverlay}
+          onOverlayChange={store.updateOverlayGesture}
+          onOverlayGestureStart={store.beginOverlayGesture}
+          onOverlayGestureEnd={store.commitOverlayGesture}
+          onOverlayGestureCancel={store.cancelOverlayGesture}
         />
       </div>
     </main>

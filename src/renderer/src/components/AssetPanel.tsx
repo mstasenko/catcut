@@ -17,6 +17,11 @@ const categoryNames: Record<AssetCategory, string> = {
   image: 'Images', video: 'Videos', audio: 'Audio'
 }
 
+function inCategory(asset: AssetItem, category: AssetCategory | null): boolean {
+  if (category === 'video') return asset.type === 'video' || asset.type === 'gif'
+  return asset.type === category
+}
+
 function AssetRow({ asset, previewing, onPreview, onAsset, onHover }: {
   asset: AssetItem
   previewing: boolean
@@ -99,7 +104,7 @@ export function AssetPanel(props: AssetPanelProps): React.JSX.Element {
   const [hovered, setHovered] = useState<AssetItem | null>(null)
   const preview = useRef<HTMLAudioElement | null>(null)
   const visible = useMemo(() => props.assets.filter((asset) =>
-    asset.type === props.category && asset.name.toLowerCase().includes(filter.toLowerCase())
+    inCategory(asset, props.category) && asset.name.toLowerCase().includes(filter.toLowerCase())
   ), [props.assets, filter, props.category])
 
   useEffect(() => () => preview.current?.pause(), [])

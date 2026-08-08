@@ -23,6 +23,7 @@ export interface EditorState {
   session: EditSession | null
   history: EditSession[]
   future: EditSession[]
+  gesture: EditSession | null
   assets: AssetItem[]
   gpu: GpuDiagnostics | null
   job: JobProgress | null
@@ -40,6 +41,10 @@ export interface EditorState {
   addExternalMedia: () => Promise<void>
   selectOverlay: (id: string | null) => void
   updateOverlay: (id: string, patch: Partial<Overlay>) => void
+  beginOverlayGesture: () => void
+  updateOverlayGesture: (id: string, patch: Partial<Overlay>) => void
+  commitOverlayGesture: () => void
+  cancelOverlayGesture: () => void
   removeSelectedOverlay: () => void
   undo: () => void
   redo: () => void
@@ -68,11 +73,22 @@ function mutation(
   }
 }
 
+function patchedOverlaySession(session: EditSession, id: string, patch: Partial<Overlay>): EditSession {
+  return {
+    ...session,
+    dirty: true,
+    overlays: session.overlays.map((overlay) =>
+      overlay.id === id ? ({ ...overlay, ...patch } as Overlay) : overlay
+    )
+  }
+}
+
 export const useEditorStore = create<EditorState>((set, get) => ({
   initialized: false,
   session: null,
   history: [],
   future: [],
+  gesture: null,
   assets: [],
   gpu: null,
   job: null,
@@ -100,7 +116,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const url = await window.catcut.getPathUrl(path)
       const session = createSession(metadata)
       session.playbackPath = url
-      set({ session, history: [], future: [], busy: null })
+      set({ session, history: [], future: [], gesture: null, busy: null })
       if (metadata.hasAudio) {
         void window.catcut.waveform(path).then((waveform) => {
           const current = get().session
@@ -198,7 +214,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         overlay = {
           id: makeId('audio'), type: 'audio', name: asset.name, path: asset.path,
           start: session.playhead, duration, zIndex: session.overlays.length + 1,
-          volume: 1, sourceDuration: naturalDuration
+          volume: 1, sourceIn: 0, sourceDuration: naturalDuration
         }
       } else if (asset.type === 'video') {
         overlay = {
@@ -206,14 +222,21 @@ export const useEditorStore = create<EditorState>((set, get) => ({
           start: session.playhead, duration, zIndex: session.overlays.length + 1,
           x: 0.6, y: 0.06, width: 0.34, height: 0.34,
           opacity: 1, loop: false, audioEnabled: false, hasAudio: metadata.hasAudio,
-          volume: 1, sourceDuration: naturalDuration
+          volume: 1, sourceIn: 0, sourceDuration: naturalDuration
+        }
+      } else if (asset.type === 'gif') {
+        overlay = {
+          id: makeId('gif'), type: 'gif', name: asset.name, path: asset.path,
+          playbackPath: metadata.playbackPath,
+          start: session.playhead, duration, zIndex: session.overlays.length + 1,
+          x: 0.62, y: 0.08, width: 0.3, height: 0.3, opacity: 1,
+          loop: true, sourceIn: 0, sourceDuration: naturalDuration
         }
       } else {
         overlay = {
-          id: makeId(asset.type), type: asset.type, name: asset.name, path: asset.path,
+          id: makeId('image'), type: 'image', name: asset.name, path: asset.path,
           start: session.playhead, duration, zIndex: session.overlays.length + 1,
-          x: 0.62, y: 0.08, width: 0.3, height: 0.3, opacity: 1,
-          loop: asset.type === 'gif', sourceDuration: asset.type === 'gif' ? naturalDuration : undefined
+          x: 0.62, y: 0.08, width: 0.3, height: 0.3, opacity: 1, loop: false
         }
       }
       set((state) => mutation(state, (current) => ({
@@ -243,12 +266,39 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
 
   updateOverlay(id, patch) {
-    set((state) => mutation(state, (session) => ({
-      ...session,
-      overlays: session.overlays.map((overlay) =>
-        overlay.id === id ? ({ ...overlay, ...patch } as Overlay) : overlay
-      )
-    })))
+    set((state) => mutation(state, (session) => patchedOverlaySession(session, id, patch)))
+  },
+
+  beginOverlayGesture() {
+    set((state) => state.session && !state.gesture
+      ? { gesture: cloneSession(state.session) }
+      : state)
+  },
+
+  updateOverlayGesture(id, patch) {
+    set((state) => state.session
+      ? { session: patchedOverlaySession(state.session, id, patch) }
+      : state)
+  },
+
+  commitOverlayGesture() {
+    set((state) => {
+      if (!state.gesture || !state.session) return state
+      if (JSON.stringify(state.gesture.overlays) === JSON.stringify(state.session.overlays)) {
+        return { gesture: null }
+      }
+      return {
+        gesture: null,
+        history: [...state.history.slice(-49), state.gesture],
+        future: []
+      }
+    })
+  },
+
+  cancelOverlayGesture() {
+    set((state) => state.gesture
+      ? { session: state.gesture, gesture: null }
+      : state)
   },
 
   removeSelectedOverlay() {
@@ -265,6 +315,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       if (!previous || !state.session) return state
       return {
         session: cloneSession(previous),
+        gesture: null,
         history: state.history.slice(0, -1),
         future: [cloneSession(state.session), ...state.future].slice(0, 50)
       }
@@ -277,6 +328,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       if (!next || !state.session) return state
       return {
         session: cloneSession(next),
+        gesture: null,
         history: [...state.history, cloneSession(state.session)].slice(-50),
         future: state.future.slice(1)
       }

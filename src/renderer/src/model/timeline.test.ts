@@ -7,6 +7,8 @@ import {
   deletionRange,
   defaultTextOverlay,
   formatTime,
+  isSourceTimedOverlay,
+  overlaySourceTime,
   outputTimeForSource,
   overlayAtTime,
   positionAtOutputTime,
@@ -16,7 +18,7 @@ import {
 } from './timeline'
 
 const source: MediaMetadata = {
-  path: '/video.mp4', name: 'video.mp4', size: 100, duration: 20,
+  path: '/video.mp4', name: 'video.mp4', size: 100, modifiedAt: 1, duration: 20,
   width: 1920, height: 1080, fps: 30, videoCodec: 'h264', audioCodec: 'aac',
   hasAudio: true, rotation: 0, pixelFormat: 'yuv420p'
 }
@@ -97,6 +99,60 @@ describe('timeline model', () => {
     ])
   })
 
+  it('splits timed media and preserves its source position across a ripple cut', () => {
+    const audio: Overlay = {
+      id: 'audio', type: 'audio', name: 'Music', path: '/music.wav',
+      start: 1, duration: 7, zIndex: 1, volume: 1, sourceIn: 10, sourceDuration: 30
+    }
+    const result = removeOutputRange(
+      [{ id: 'source', sourceStart: 0, sourceEnd: 10 }],
+      [audio],
+      2,
+      6
+    )
+    expect(result.overlays).toHaveLength(2)
+    expect(result.overlays[0]).toMatchObject({ id: 'audio', start: 1, duration: 1, sourceIn: 10 })
+    expect(result.overlays[1]).toMatchObject({ start: 2, duration: 2, sourceIn: 15 })
+    expect(result.overlays[1]?.id).not.toBe('audio')
+  })
+
+  it('trims either edge of timed source media without restarting it', () => {
+    const audio = (id: string, start: number, duration: number): Overlay => ({
+      id, type: 'audio', name: id, path: `/${id}.wav`, start, duration,
+      zIndex: 1, volume: 1, sourceIn: 4, sourceDuration: 20
+    })
+    const result = removeOutputRange(
+      [{ id: 'source', sourceStart: 0, sourceEnd: 10 }],
+      [audio('left', 1, 3), audio('right', 3, 5), audio('removed', 3, 1)],
+      2,
+      6
+    )
+    expect(result.overlays).toHaveLength(2)
+    expect(result.overlays[0]).toMatchObject({ id: 'left', start: 1, duration: 1, sourceIn: 4 })
+    expect(result.overlays[1]).toMatchObject({ id: 'right', start: 2, duration: 2, sourceIn: 7 })
+  })
+
+  it('uses the same source-aware ripple behavior for video and GIF clips', () => {
+    const visual = {
+      name: 'Clip', path: '/clip', start: 1, duration: 7, zIndex: 1,
+      x: 0, y: 0, width: 1, height: 1, opacity: 1, loop: true,
+      sourceIn: 2, sourceDuration: 20
+    }
+    const overlays: Overlay[] = [
+      { ...visual, id: 'video', type: 'video', audioEnabled: false, hasAudio: false, volume: 1 },
+      { ...visual, id: 'gif', type: 'gif' }
+    ]
+    const result = removeOutputRange(
+      [{ id: 'source', sourceStart: 0, sourceEnd: 10 }],
+      overlays,
+      2,
+      6
+    )
+    expect(result.overlays.filter((overlay) => overlay.type === 'video')).toHaveLength(2)
+    expect(result.overlays.filter((overlay) => overlay.type === 'gif')).toHaveLength(2)
+    expect(result.overlays.filter(isSourceTimedOverlay).filter((overlay) => overlay.sourceIn === 7)).toHaveLength(2)
+  })
+
   it('handles reversed, empty, and bounded removals', () => {
     const segments = [{ id: 'a', sourceStart: 0, sourceEnd: 10 }]
     expect(removeOutputRange(segments, [], 5, 5).segments).toBe(segments)
@@ -116,5 +172,20 @@ describe('timeline model', () => {
     expect(formatTime(65.5)).toBe('01:05.15')
     expect(formatTime(3661)).toBe('1:01:01.00')
     expect(formatTime(Number.NaN)).toBe('00:00.00')
+    expect(formatTime(1.5, 24)).toBe('00:01.12')
+    expect(formatTime(1.5, 0)).toBe('00:01.15')
+    const audio: Overlay = {
+      id: 'audio', type: 'audio', name: 'audio', path: '/audio.wav', start: 2,
+      duration: 3, zIndex: 1, volume: 1, sourceIn: 4, sourceDuration: 10
+    }
+    const gif: Overlay = {
+      id: 'gif', type: 'gif', name: 'gif', path: '/gif.gif', start: 2,
+      duration: 3, zIndex: 1, x: 0, y: 0, width: 1, height: 1, opacity: 1,
+      loop: true, sourceIn: 9, sourceDuration: 10
+    }
+    expect(isSourceTimedOverlay(audio)).toBe(true)
+    expect(isSourceTimedOverlay(overlay)).toBe(false)
+    expect(overlaySourceTime(audio, 3)).toBe(5)
+    expect(overlaySourceTime(gif, 4)).toBe(1)
   })
 })

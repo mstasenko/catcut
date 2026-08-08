@@ -54,7 +54,7 @@ CatCut still works without the pack; use **New** to add your own media.
 4. Add text or choose an image, video, or audio item from the left panel.
 5. Choose **Export video**.
 
-Open, New, and Export start in Downloads and remember their last folders only until CatCut closes. Export blocks editing while it runs and can be cancelled safely.
+Open and Export start in Videos. New media starts in Downloads. Each remembers its last folder only until CatCut closes. Export blocks editing while it runs and can be cancelled safely.
 
 Useful shortcuts:
 

@@ -30,10 +30,22 @@ describe('media streaming protocol', () => {
     await writeFile(path, Buffer.from('0123456789'))
     const response = await mediaResponse(new Request(mediaUrl(path), {
       headers: { range: 'bytes=3-6' }
-    }))
+    }), (candidate) => candidate === path)
     expect(response.status).toBe(206)
     expect(response.headers.get('content-range')).toBe('bytes 3-6/10')
     expect(response.headers.get('accept-ranges')).toBe('bytes')
     expect(Buffer.from(await response.arrayBuffer()).toString()).toBe('3456')
+  })
+
+  it('rejects paths that were not selected in this session', async () => {
+    const response = await mediaResponse(new Request(mediaUrl('/private/video.mp4')), () => false)
+    expect(response.status).toBe(403)
+  })
+
+  it('serves authorized media only through read-only HTTP methods', async () => {
+    const path = '/selected/video.mp4'
+    const response = await mediaResponse(new Request(mediaUrl(path), { method: 'POST' }), () => true)
+    expect(response.status).toBe(405)
+    expect(response.headers.get('allow')).toBe('GET, HEAD')
   })
 })

@@ -8,7 +8,7 @@ const categories = ['video', 'audio', 'image', 'gif'] as const
 type AssetCategory = (typeof categories)[number]
 
 const extensions: Record<AssetCategory, Set<string>> = {
-  video: new Set(['.mp4', '.mov', '.mkv', '.webm']),
+  video: new Set(['.mp4', '.mov', '.mkv', '.webm', '.m4v', '.avi']),
   audio: new Set(['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac']),
   image: new Set(['.png', '.jpg', '.jpeg', '.webp', '.svg']),
   gif: new Set(['.gif'])

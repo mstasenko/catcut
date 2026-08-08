@@ -1,4 +1,4 @@
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { rm } from 'node:fs/promises'
 import {
   app,
@@ -7,7 +7,7 @@ import {
   ipcMain,
   protocol
 } from 'electron'
-import type { ExportRequest, GpuDiagnostics, MediaMetadata } from '../types'
+import type { ExportRequest, GpuDiagnostics, Overlay } from '../types'
 import { categoryFor, displayName, scanAssets } from './assets'
 import { exportVideo } from './exporter'
 import { jobs } from './jobs'
@@ -16,6 +16,15 @@ import { mediaResponse, mediaUrl } from './media-protocol'
 import { installDesktopIntegration } from './desktop'
 import { SessionDirectory } from './session-directory'
 import { initialWindowSize } from './window-options'
+import { SessionPathRegistry } from './path-registry'
+import { svgDataUrl } from './svg'
+import {
+  parseDefaultName,
+  parseExportRequest,
+  parseJobId,
+  parseMediaMetadata,
+  parsePath
+} from './validation'
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -68,7 +77,7 @@ async function gpuDiagnostics(): Promise<GpuDiagnostics> {
   }
 }
 
-function createWindow(): BrowserWindow {
+function createWindow(paths: SessionPathRegistry): BrowserWindow {
   const windowSize = initialWindowSize(process.env.CATCUT_E2E_COMPACT === '1')
   const windowIcon = app.isPackaged
     ? join(process.resourcesPath, 'resources', 'catcut-icon.png')
@@ -104,7 +113,9 @@ function createWindow(): BrowserWindow {
     index > 0 && /\.(mp4|mov|mkv|webm|m4v|avi)$/i.test(argument)
   )
   if (requestedPath) {
-    window.webContents.once('did-finish-load', () => window.webContents.send('app:open-path', requestedPath))
+    window.webContents.once('did-finish-load', () => {
+      void paths.allowRead(resolve(requestedPath)).then((path) => window.webContents.send('app:open-path', path))
+    })
   }
   return window
 }
@@ -121,7 +132,42 @@ const mediaExtensions = [
   'png', 'jpg', 'jpeg', 'webp', 'svg', 'gif'
 ]
 
-function registerIpc(directories: DialogDirectories): void {
+async function authorizedAssets(paths: SessionPathRegistry): Promise<Awaited<ReturnType<typeof scanAssets>>> {
+  const assets = await scanAssets()
+  const authorized = await Promise.all(assets.map(async (asset) => {
+    try {
+      return { ...asset, path: await paths.allowRead(asset.path) }
+    } catch {
+      return null
+    }
+  }))
+  return authorized.filter((asset) => asset !== null)
+}
+
+function authorizeOverlay(overlay: Overlay, paths: SessionPathRegistry): Overlay {
+  if (overlay.type === 'text') return overlay
+  return { ...overlay, path: paths.assertReadable(overlay.path) }
+}
+
+async function trustedExport(value: unknown, paths: SessionPathRegistry): Promise<ExportRequest> {
+  const supplied = parseExportRequest(value)
+  const sourcePath = paths.assertReadable(supplied.source.path)
+  const request = parseExportRequest({ ...supplied, source: await probeMedia(sourcePath) })
+  return {
+    ...request,
+    outputPath: paths.assertWritable(request.outputPath),
+    overlays: request.overlays.map((overlay) => authorizeOverlay(overlay, paths))
+  }
+}
+
+async function trustedAssetMetadata(path: string, paths: SessionPathRegistry): Promise<Awaited<ReturnType<typeof probeAsset>>> {
+  const metadata = await probeAsset(path)
+  if (categoryFor(path) !== 'gif') return metadata
+  const proxy = await createProxy(await probeMedia(path))
+  return { ...metadata, playbackPath: await paths.allowRead(proxy.result.path) }
+}
+
+function registerIpc(directories: DialogDirectories, paths: SessionPathRegistry): void {
   ipcMain.handle('dialog:open-video', async () => {
     const result = await dialog.showOpenDialog({
       title: 'Open a video',
@@ -129,45 +175,71 @@ function registerIpc(directories: DialogDirectories): void {
       properties: ['openFile'],
       filters: [{ name: 'Video', extensions: ['mp4', 'mov', 'mkv', 'webm', 'm4v', 'avi'] }]
     })
-    const path = result.filePaths[0]
-    if (!path) return null
+    const selected = result.filePaths[0]
+    if (!selected) return null
+    const path = await paths.allowRead(selected)
     directories.open.remember(path)
     return path
   })
   ipcMain.handle('dialog:open-media', async () => {
-    const result = await dialog.showOpenDialog({
-      title: 'Add media',
-      defaultPath: directories.media.defaultPath(),
-      properties: ['openFile'],
-      filters: [{ name: 'Audio, video, GIF, or image', extensions: mediaExtensions }]
-    })
-    const path = result.filePaths[0]
-    if (!path) return null
-    const type = categoryFor(path)
+    const testSelection = process.env.CATCUT_E2E_MEDIA
+    const result = testSelection
+      ? { filePaths: [testSelection] }
+      : await dialog.showOpenDialog({
+          title: 'Add media',
+          defaultPath: directories.media.defaultPath(),
+          properties: ['openFile'],
+          filters: [{ name: 'Audio, video, GIF, or image', extensions: mediaExtensions }]
+        })
+    const selected = testSelection ?? result.filePaths[0]
+    if (!selected) return null
+    const type = categoryFor(selected)
     if (!type) return null
+    const path = await paths.allowRead(selected)
     directories.media.remember(path)
     return { path, type, name: displayName(path) }
   })
-  ipcMain.handle('dialog:export-path', async (_event, defaultName: string) => {
-    if (process.env.CATCUT_E2E_OUTPUT) return process.env.CATCUT_E2E_OUTPUT
+  ipcMain.handle('dialog:export-path', async (_event, value: unknown) => {
+    const defaultName = parseDefaultName(value)
+    if (process.env.CATCUT_E2E_OUTPUT) return paths.allowWrite(process.env.CATCUT_E2E_OUTPUT)
     const result = await dialog.showSaveDialog({
       title: 'Export edited video',
       defaultPath: directories.export.defaultPath(defaultName),
       filters: [{ name: 'MP4 Video', extensions: ['mp4'] }]
     })
     if (!result.filePath) return null
-    directories.export.remember(result.filePath)
-    return result.filePath
+    const path = await paths.allowWrite(result.filePath)
+    directories.export.remember(path)
+    return path
   })
-  ipcMain.handle('media:probe', (_event, path: string) => probeMedia(path))
-  ipcMain.handle('media:probe-asset', (_event, path: string) => probeAsset(path))
-  ipcMain.handle('media:waveform', (_event, path: string) => waveformFor(path))
-  ipcMain.handle('media:should-proxy', (_event, metadata: MediaMetadata) => mediaNeedsProxy(metadata))
-  ipcMain.handle('media:create-proxy', (_event, metadata: MediaMetadata) => createProxy(metadata))
-  ipcMain.handle('media:url', (_event, path: string) => mediaUrl(path))
-  ipcMain.handle('assets:scan', scanAssets)
-  ipcMain.handle('export:start', (_event, request: ExportRequest) => exportVideo(request))
-  ipcMain.handle('job:cancel', (_event, id: string) => jobs.cancel(id))
+  ipcMain.handle('media:authorize-drop', async (_event, value: unknown) => {
+    const path = parsePath(value)
+    if (categoryFor(path) !== 'video') throw new Error('Only video files can be opened here')
+    return paths.allowRead(path)
+  })
+  ipcMain.handle('media:probe', (_event, value: unknown) => probeMedia(paths.assertReadable(parsePath(value))))
+  ipcMain.handle('media:probe-asset', (_event, value: unknown) => {
+    const path = paths.assertReadable(parsePath(value))
+    return trustedAssetMetadata(path, paths)
+  })
+  ipcMain.handle('media:waveform', (_event, value: unknown) => waveformFor(paths.assertReadable(parsePath(value))))
+  ipcMain.handle('media:should-proxy', (_event, value: unknown) => {
+    const metadata = parseMediaMetadata(value)
+    paths.assertReadable(metadata.path)
+    return mediaNeedsProxy(metadata)
+  })
+  ipcMain.handle('media:create-proxy', async (_event, value: unknown) => {
+    const supplied = parseMediaMetadata(value)
+    const metadata = await probeMedia(paths.assertReadable(supplied.path))
+    const result = await createProxy(metadata)
+    await paths.allowRead(result.result.path)
+    return result
+  })
+  ipcMain.handle('media:url', (_event, value: unknown) => mediaUrl(paths.assertReadable(parsePath(value))))
+  ipcMain.handle('media:svg-data', (_event, value: unknown) => svgDataUrl(paths.assertReadable(parsePath(value))))
+  ipcMain.handle('assets:scan', () => authorizedAssets(paths))
+  ipcMain.handle('export:start', async (_event, value: unknown) => exportVideo(await trustedExport(value, paths)))
+  ipcMain.handle('job:cancel', (_event, value: unknown) => jobs.cancel(parseJobId(value)))
   ipcMain.handle('gpu:diagnostics', gpuDiagnostics)
 }
 
@@ -189,17 +261,19 @@ async function startApplication(): Promise<void> {
       dataHome
     }).catch((error: unknown) => console.warn('Desktop integration unavailable:', error))
   }
-  protocol.handle('catcut-media', mediaResponse)
+  const paths = new SessionPathRegistry()
+  protocol.handle('catcut-media', (request) => mediaResponse(request, (path) => paths.canRead(path)))
   const downloads = app.getPath('downloads')
+  const videos = app.getPath('videos')
   registerIpc({
-    open: new SessionDirectory(downloads),
-    export: new SessionDirectory(downloads),
+    open: new SessionDirectory(videos),
+    export: new SessionDirectory(videos),
     media: new SessionDirectory(downloads)
-  })
-  createWindow()
+  }, paths)
+  createWindow(paths)
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    if (BrowserWindow.getAllWindows().length === 0) createWindow(paths)
   })
 }
 

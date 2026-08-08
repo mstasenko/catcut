@@ -1,6 +1,6 @@
 {
   "name": "catcut",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A focused, Wayland-native video editor for long videos",
   "author": "CatCut contributors",
   "desktopName": "catcut.desktop",

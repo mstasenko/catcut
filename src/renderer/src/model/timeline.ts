@@ -83,12 +83,47 @@ export function outputTimeForSource(
   return before + clamp(sourceTime - segment.sourceStart, 0, segment.sourceEnd - segment.sourceStart)
 }
 
-function trimOverlaysForRemoval(overlays: Overlay[], start: number, end: number): Overlay[] {
+type SourceTimedOverlay = Extract<Overlay, { type: 'audio' | 'video' | 'gif' }>
+
+export function isSourceTimedOverlay(overlay: Overlay): overlay is SourceTimedOverlay {
+  return overlay.type === 'audio' || overlay.type === 'video' || overlay.type === 'gif'
+}
+
+export function overlaySourceTime(overlay: SourceTimedOverlay, timelineTime: number): number {
+  const elapsed = Math.max(0, timelineTime - overlay.start)
+  const sourceTime = overlay.sourceIn + elapsed
+  return overlay.type !== 'audio' && overlay.loop && overlay.sourceDuration > EPSILON
+    ? sourceTime % overlay.sourceDuration
+    : sourceTime
+}
+
+function trimSourceOverlay(overlay: SourceTimedOverlay, start: number, end: number): Overlay[] {
+  const overlayEnd = overlay.start + overlay.duration
+  const leftDuration = Math.max(0, start - overlay.start)
+  const rightDuration = Math.max(0, overlayEnd - end)
+  const output: Overlay[] = []
+  // A middle ripple cut creates two clips. The right clip advances sourceIn so
+  // playback and export skip the removed source interval instead of restarting.
+  if (leftDuration > EPSILON) output.push({ ...overlay, duration: leftDuration })
+  if (rightDuration > EPSILON) {
+    output.push({
+      ...overlay,
+      id: leftDuration > EPSILON ? makeId(overlay.type) : overlay.id,
+      start,
+      duration: rightDuration,
+      sourceIn: overlay.sourceIn + Math.max(0, end - overlay.start)
+    })
+  }
+  return output
+}
+
+export function trimOverlaysForRemoval(overlays: Overlay[], start: number, end: number): Overlay[] {
   const removedDuration = end - start
   return overlays.flatMap((overlay) => {
     const overlayEnd = overlay.start + overlay.duration
     if (overlayEnd <= start) return [overlay]
     if (overlay.start >= end) return [{ ...overlay, start: overlay.start - removedDuration }]
+    if (isSourceTimedOverlay(overlay)) return trimSourceOverlay(overlay, start, end)
     if (overlay.start < start && overlayEnd > end) {
       return [{ ...overlay, duration: overlay.duration - removedDuration }]
     }
@@ -217,11 +252,14 @@ export function snapTime(time: number, candidates: number[], threshold: number):
   return result
 }
 
-export function formatTime(seconds: number): string {
+export function formatTime(seconds: number, framesPerSecond = 30): string {
   const safe = Math.max(0, Number.isFinite(seconds) ? seconds : 0)
+  const fps = Number.isFinite(framesPerSecond) && framesPerSecond > 0
+    ? Math.max(1, Math.round(framesPerSecond))
+    : 30
   const hours = Math.floor(safe / 3600)
   const minutes = Math.floor((safe % 3600) / 60)
   const remainder = Math.floor(safe % 60)
-  const frames = Math.floor((safe - Math.floor(safe)) * 30)
+  const frames = Math.min(fps - 1, Math.floor((safe - Math.floor(safe)) * fps))
   return `${hours ? `${hours}:` : ''}${String(minutes).padStart(2, '0')}:${String(remainder).padStart(2, '0')}.${String(frames).padStart(2, '0')}`
 }
