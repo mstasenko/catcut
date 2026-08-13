@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseDefaultName, parseExportRequest, parseMediaMetadata } from './validation'
+import { parseDefaultName, parseExportRequest, parseMediaMetadata, parseSavedSession } from './validation'
 
 const metadata = {
   path: '/video.mp4', name: 'video.mp4', size: 10, modifiedAt: 100, duration: 3,
@@ -16,20 +16,49 @@ describe('IPC input validation', () => {
 
   it('validates the complete export structure', () => {
     const request = {
-      source: metadata,
+      canvas: { width: metadata.width, height: metadata.height, fps: metadata.fps, fit: 'contain' },
+      sources: [{ id: 'source', metadata }],
       outputPath: '/edited.mp4',
-      segments: [{ id: 'segment', sourceStart: 0, sourceEnd: 3 }],
+      segments: [{ id: 'segment', sourceId: 'source', sourceStart: 0, sourceEnd: 3 }],
       overlays: [{
         id: 'audio', type: 'audio', name: 'Effect', path: '/effect.wav',
         start: 1, duration: 1, zIndex: 1, volume: 1, sourceIn: 0.5, sourceDuration: 2
       }]
     }
     expect(parseExportRequest(request)).toEqual(request)
-    expect(() => parseExportRequest({ ...request, segments: [{ id: 'bad', sourceStart: 2, sourceEnd: 1 }] })).toThrow('positive')
+    expect(() => parseExportRequest({ ...request, segments: [{ id: 'bad', sourceId: 'source', sourceStart: 2, sourceEnd: 1 }] })).toThrow('positive')
     expect(() => parseExportRequest({
       ...request,
       overlays: [{ ...request.overlays[0], volume: 5 }]
     })).toThrow('volume')
+  })
+
+  it('rejects invalid canvases and segment source references', () => {
+    const request = {
+      canvas: { width: 1080, height: 1920, fps: 24, fit: 'cover' },
+      sources: [{ id: 'source', metadata }],
+      outputPath: '/edited.mp4',
+      segments: [{ id: 'segment', sourceId: 'missing', sourceStart: 0, sourceEnd: 1 }],
+      overlays: []
+    }
+    expect(() => parseExportRequest(request)).toThrow('unknown video source')
+    expect(() => parseExportRequest({ ...request, canvas: { ...request.canvas, fit: 'stretch' } })).toThrow('Canvas fit')
+    expect(() => parseExportRequest({
+      ...request,
+      sources: [{ id: 'source', metadata }, { id: 'source', metadata }]
+    })).toThrow('unique')
+  })
+
+  it('validates restorable editor state', () => {
+    const saved = {
+      canvas: { width: 320, height: 180, fps: 24, fit: 'contain' },
+      sources: [{ id: 'source', metadata }],
+      segments: [{ id: 'segment', sourceId: 'source', sourceStart: 0, sourceEnd: 3 }],
+      overlays: [], selectedOverlayId: null, playhead: 1, cutPoints: [1, 2], dirty: true
+    }
+    expect(parseSavedSession(saved)).toEqual(saved)
+    expect(() => parseSavedSession({ ...saved, playhead: 4 })).toThrow('Playhead')
+    expect(() => parseSavedSession({ ...saved, cutPoints: 'bad' })).toThrow('Cut points')
   })
 
   it('allows only plain MP4 export names', () => {

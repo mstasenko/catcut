@@ -68,7 +68,7 @@ test('opens, edits, and exports real media', async () => {
   await expect(window.getByRole('button', { name: 'Import collection' })).toHaveCount(0)
   await click(window.getByRole('button', { name: 'Text', exact: true }))
   await window.getByRole('textbox', { name: 'Text' }).fill('E2E WORKS')
-  const exportButton = window.getByRole('button', { name: 'Export video' })
+  const exportButton = window.getByRole('button', { name: 'Export', exact: true })
   await click(exportButton)
   await expect(window.getByRole('dialog', { name: 'Exporting video' })).toBeVisible()
   await expect(exportButton).toBeEnabled({ timeout: 30_000 })

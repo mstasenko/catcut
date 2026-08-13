@@ -3,6 +3,7 @@ import type {
   MediaMetadata,
   Overlay,
   SourceSegment,
+  TimelineSource,
   TextOverlay
 } from '@shared/types'
 
@@ -20,18 +21,34 @@ export function timelineDuration(segments: SourceSegment[]): number {
   return segments.reduce((total, segment) => total + segment.sourceEnd - segment.sourceStart, 0)
 }
 
-export function createSession(source: MediaMetadata): EditSession {
+export function createSession(source: MediaMetadata, short = false): EditSession {
+  const sourceId = makeId('source')
+  // A fixed Short canvas keeps the centered cover crop identical in preview and export.
   return {
-    source,
-    playbackPath: source.path,
-    segments: [{ id: makeId('segment'), sourceStart: 0, sourceEnd: source.duration }],
+    canvas: {
+      width: short ? 1080 : source.width,
+      height: short ? 1920 : source.height,
+      fps: source.fps > 0 ? source.fps : 30,
+      fit: short ? 'cover' : 'contain'
+    },
+    sources: [{ id: sourceId, metadata: source, playbackPath: source.path, waveform: [] }],
+    segments: [{ id: makeId('segment'), sourceId, sourceStart: 0, sourceEnd: source.duration }],
     overlays: [],
-    waveform: [],
     selectedOverlayId: null,
     playhead: 0,
     cutPoints: [],
     dirty: false
   }
+}
+
+export function sourceForSegment(session: EditSession, segment: SourceSegment): TimelineSource | null {
+  return session.sources.find((source) => source.id === segment.sourceId) ?? null
+}
+
+export function primarySource(session: EditSession): TimelineSource {
+  const source = session.sources[0]
+  if (!source) throw new Error('The project has no video source')
+  return source
 }
 
 export interface TimelinePosition {
@@ -161,6 +178,7 @@ export function removeOutputRange(
     if (keepBefore > EPSILON) {
       output.push({
         id: makeId('segment'),
+        sourceId: segment.sourceId,
         sourceStart: segment.sourceStart,
         sourceEnd: segment.sourceStart + keepBefore
       })
@@ -168,6 +186,7 @@ export function removeOutputRange(
     if (keepAfter > EPSILON) {
       output.push({
         id: makeId('segment'),
+        sourceId: segment.sourceId,
         sourceStart: segment.sourceEnd - keepAfter,
         sourceEnd: segment.sourceEnd
       })
@@ -178,6 +197,76 @@ export function removeOutputRange(
   return {
     segments: output,
     overlays: trimOverlaysForRemoval(overlays, start, end)
+  }
+}
+
+function overlaysAfterInsertion(overlays: Overlay[], point: number, duration: number): Overlay[] {
+  return overlays.flatMap((overlay) => {
+    const overlayEnd = overlay.start + overlay.duration
+    if (overlayEnd <= point + EPSILON) return [overlay]
+    if (overlay.start >= point - EPSILON) return [{ ...overlay, start: overlay.start + duration }]
+
+    const leftDuration = point - overlay.start
+    const rightDuration = overlayEnd - point
+    const right: Overlay = {
+      ...overlay,
+      id: makeId(overlay.type),
+      start: point + duration,
+      duration: rightDuration,
+      ...(isSourceTimedOverlay(overlay) ? { sourceIn: overlay.sourceIn + leftDuration } : {})
+    } as Overlay
+    return [{ ...overlay, duration: leftDuration }, right]
+  })
+}
+
+export function insertSourceAtOutputTime(
+  session: EditSession,
+  source: TimelineSource,
+  rawPoint: number
+): EditSession {
+  const total = timelineDuration(session.segments)
+  const point = clamp(rawPoint, 0, total)
+  const inserted: SourceSegment = {
+    id: makeId('segment'),
+    sourceId: source.id,
+    sourceStart: 0,
+    sourceEnd: source.metadata.duration
+  }
+  const segments: SourceSegment[] = []
+  let cursor = 0
+  let didInsert = false
+
+  for (const segment of session.segments) {
+    const segmentDuration = segment.sourceEnd - segment.sourceStart
+    const offset = point - cursor
+    if (!didInsert && offset <= EPSILON) {
+      segments.push(inserted)
+      didInsert = true
+    } else if (!didInsert && offset < segmentDuration - EPSILON) {
+      segments.push(
+        { ...segment, id: makeId('segment'), sourceEnd: segment.sourceStart + offset },
+        inserted,
+        { ...segment, id: makeId('segment'), sourceStart: segment.sourceStart + offset }
+      )
+      didInsert = true
+      cursor += segmentDuration
+      continue
+    }
+    segments.push(segment)
+    cursor += segmentDuration
+  }
+  if (!didInsert) segments.push(inserted)
+
+  return {
+    ...session,
+    sources: [...session.sources, source],
+    segments,
+    overlays: overlaysAfterInsertion(session.overlays, point, source.metadata.duration),
+    cutPoints: session.cutPoints.map((cutPoint) => cutPoint > point + EPSILON
+      ? cutPoint + source.metadata.duration
+      : cutPoint),
+    selectedOverlayId: null,
+    playhead: point
   }
 }
 

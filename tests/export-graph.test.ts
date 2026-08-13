@@ -24,16 +24,18 @@ describe('FFmpeg export graph', () => {
         zIndex: 2, volume: 0.8, sourceIn: 0.25, sourceDuration: 1
       }
     ]
+    const source = {
+      path: '/source.mp4', name: 'source.mp4', size: 100, modifiedAt: 1, duration: 10,
+      width: 1280, height: 720, fps: 30, videoCodec: 'h264', audioCodec: 'aac',
+      hasAudio: true, rotation: 0, pixelFormat: 'yuv420p'
+    }
     const request: ExportRequest = {
-      source: {
-        path: '/source.mp4', name: 'source.mp4', size: 100, modifiedAt: 1, duration: 10,
-        width: 1280, height: 720, fps: 30, videoCodec: 'h264', audioCodec: 'aac',
-        hasAudio: true, rotation: 0, pixelFormat: 'yuv420p'
-      },
+      canvas: { width: source.width, height: source.height, fps: source.fps, fit: 'contain' },
+      sources: [{ id: 'source', metadata: source }],
       outputPath: '/output.mp4',
       segments: [
-        { id: 's1', sourceStart: 0, sourceEnd: 4 },
-        { id: 's2', sourceStart: 6, sourceEnd: 10 }
+        { id: 's1', sourceId: 'source', sourceStart: 0, sourceEnd: 4 },
+        { id: 's2', sourceId: 'source', sourceStart: 6, sourceEnd: 10 }
       ],
       overlays
     }
@@ -50,13 +52,15 @@ describe('FFmpeg export graph', () => {
   })
 
   it('creates silence for a source without audio', () => {
+    const source = {
+      path: '/silent.mp4', name: 'silent.mp4', size: 10, modifiedAt: 1, duration: 3,
+      width: 320, height: 180, fps: 24, videoCodec: 'h264', audioCodec: null,
+      hasAudio: false, rotation: 0, pixelFormat: 'yuv420p'
+    }
     const request: ExportRequest = {
-      source: {
-        path: '/silent.mp4', name: 'silent.mp4', size: 10, modifiedAt: 1, duration: 3,
-        width: 320, height: 180, fps: 24, videoCodec: 'h264', audioCodec: null,
-        hasAudio: false, rotation: 0, pixelFormat: 'yuv420p'
-      },
-      outputPath: '/output.mp4', segments: [{ id: 's', sourceStart: 0, sourceEnd: 3 }], overlays: []
+      canvas: { width: source.width, height: source.height, fps: source.fps, fit: 'contain' },
+      sources: [{ id: 'source', metadata: source }],
+      outputPath: '/output.mp4', segments: [{ id: 's', sourceId: 'source', sourceStart: 0, sourceEnd: 3 }], overlays: []
     }
     expect(buildFilterGraph(request, []).graph).toContain('anullsrc=channel_layout=stereo')
   })
@@ -75,14 +79,16 @@ describe('FFmpeg export graph', () => {
         width: 0.5, height: 0.5, opacity: 1, loop: false
       }
     ]
+    const source = {
+      path: '/source.mp4', name: 'source.mp4', size: 100, modifiedAt: 1, duration: 2,
+      width: 1280, height: 720, fps: 60, videoCodec: 'h264', audioCodec: null,
+      hasAudio: false, rotation: 0, pixelFormat: 'yuv420p'
+    }
     const request: ExportRequest = {
-      source: {
-        path: '/source.mp4', name: 'source.mp4', size: 100, modifiedAt: 1, duration: 2,
-        width: 1280, height: 720, fps: 60, videoCodec: 'h264', audioCodec: null,
-        hasAudio: false, rotation: 0, pixelFormat: 'yuv420p'
-      },
+      canvas: { width: source.width, height: source.height, fps: source.fps, fit: 'contain' },
+      sources: [{ id: 'source', metadata: source }],
       outputPath: '/output.mp4',
-      segments: [{ id: 'source', sourceStart: 0, sourceEnd: 2 }],
+      segments: [{ id: 'source', sourceId: 'source', sourceStart: 0, sourceEnd: 2 }],
       overlays
     }
     const graph = buildFilterGraph(request, overlays.map((overlay, offset) => ({ overlay, index: offset + 1 }))).graph
@@ -95,5 +101,34 @@ describe('FFmpeg export graph', () => {
     const args = streamCopyArguments('/tmp/segments.ffconcat', '/tmp/output.mp4')
     expect(args).toEqual(expect.arrayContaining(['0:v:0', '0:a:0?', '-sn', '-dn']))
     expect(args.some((argument, index) => argument === '0' && args[index - 1] === '-map')).toBe(false)
+  })
+
+  it('normalizes multiple sources into a cropped 9:16 Short canvas', () => {
+    const landscape = {
+      path: '/landscape.mp4', name: 'landscape.mp4', size: 100, modifiedAt: 1, duration: 2,
+      width: 1920, height: 1080, fps: 30, videoCodec: 'h264', audioCodec: 'aac',
+      hasAudio: true, rotation: 0, pixelFormat: 'yuv420p'
+    }
+    const silent = {
+      ...landscape, path: '/silent.mp4', name: 'silent.mp4', width: 640, height: 480,
+      fps: 24, audioCodec: null, hasAudio: false
+    }
+    const request: ExportRequest = {
+      canvas: { width: 1080, height: 1920, fps: 30, fit: 'cover' },
+      sources: [{ id: 'landscape', metadata: landscape }, { id: 'silent', metadata: silent }],
+      outputPath: '/short.mp4',
+      segments: [
+        { id: 'a', sourceId: 'landscape', sourceStart: 0, sourceEnd: 2 },
+        { id: 'b', sourceId: 'silent', sourceStart: 0, sourceEnd: 2 }
+      ],
+      overlays: []
+    }
+    const graph = buildFilterGraph(request, []).graph
+    expect(graph).toContain('[0:v:0]trim=')
+    expect(graph).toContain('[1:v:0]trim=')
+    expect(graph).toContain('scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920')
+    expect(graph).toContain('anullsrc=channel_layout=stereo:sample_rate=48000:d=2.000000')
+    expect(graph).toContain('concat=n=2:v=1:a=0')
+    expect(graph).toContain('concat=n=2:v=0:a=1')
   })
 })

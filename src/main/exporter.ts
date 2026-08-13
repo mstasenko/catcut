@@ -60,10 +60,8 @@ export function buildFilterGraph(request: ExportRequest, inputs: PreparedInput[]
   audioLabel: string
 } {
   const filters: string[] = []
-  const { segments } = request
-  const duration = segments.reduce((sum, segment) => sum + segment.sourceEnd - segment.sourceStart, 0)
   const { videoSegments, audioSegments } = addSegmentFilters(filters, request)
-  addBaseFilters(filters, videoSegments, audioSegments, request, duration)
+  addBaseFilters(filters, videoSegments, audioSegments, request)
   const videoLabel = addVisualFilters(filters, inputs, request)
   addAudioFilters(filters, inputs)
   return { graph: filters.join(';'), videoLabel, audioLabel: 'aout' }
@@ -76,18 +74,29 @@ function addSegmentFilters(filters: string[], request: ExportRequest): {
   const videoSegments: string[] = []
   const audioSegments: string[] = []
   request.segments.forEach((segment, index) => {
+    const inputIndex = request.sources.findIndex((source) => source.id === segment.sourceId)
+    const source = request.sources[inputIndex]?.metadata
+    if (inputIndex < 0 || !source) throw new Error('A timeline video source is missing')
+    const segmentDuration = segment.sourceEnd - segment.sourceStart
+    const { width, height, fps, fit } = request.canvas
+    // FFmpeg concat requires every clip to have matching video and audio formats.
+    const scaleAndCrop = fit === 'cover'
+      ? `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}`
+      : `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black`
     filters.push(
-      `[0:v:0]trim=start=${seconds(segment.sourceStart)}:end=${seconds(segment.sourceEnd)},` +
-      `setpts=PTS-STARTPTS[vseg${index}]`
+      `[${inputIndex}:v:0]trim=start=${seconds(segment.sourceStart)}:end=${seconds(segment.sourceEnd)},` +
+      `setpts=PTS-STARTPTS,${scaleAndCrop},setsar=1,fps=${fps},format=yuv420p[vseg${index}]`
     )
     videoSegments.push(`[vseg${index}]`)
-    if (request.source.hasAudio) {
+    if (source.hasAudio) {
       filters.push(
-        `[0:a:0]atrim=start=${seconds(segment.sourceStart)}:end=${seconds(segment.sourceEnd)},` +
-        `asetpts=PTS-STARTPTS[aseg${index}]`
+        `[${inputIndex}:a:0]atrim=start=${seconds(segment.sourceStart)}:end=${seconds(segment.sourceEnd)},` +
+        `asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[aseg${index}]`
       )
-      audioSegments.push(`[aseg${index}]`)
+    } else {
+      filters.push(`anullsrc=channel_layout=stereo:sample_rate=48000:d=${seconds(segmentDuration)}[aseg${index}]`)
     }
+    audioSegments.push(`[aseg${index}]`)
   })
   return { videoSegments, audioSegments }
 }
@@ -96,18 +105,14 @@ function addBaseFilters(
   filters: string[],
   videoSegments: string[],
   audioSegments: string[],
-  request: ExportRequest,
-  duration: number
+  request: ExportRequest
 ): void {
   if (request.segments.length === 1) {
     filters.push(`${videoSegments[0]}null[basev]`)
-    if (request.source.hasAudio) filters.push(`${audioSegments[0]}anull[basea]`)
+    filters.push(`${audioSegments[0]}anull[basea]`)
   } else {
     filters.push(`${videoSegments.join('')}concat=n=${request.segments.length}:v=1:a=0[basev]`)
-    if (request.source.hasAudio) filters.push(`${audioSegments.join('')}concat=n=${request.segments.length}:v=0:a=1[basea]`)
-  }
-  if (!request.source.hasAudio) {
-    filters.push(`anullsrc=channel_layout=stereo:sample_rate=48000:d=${seconds(duration)}[basea]`)
+    filters.push(`${audioSegments.join('')}concat=n=${request.segments.length}:v=0:a=1[basea]`)
   }
 }
 
@@ -129,10 +134,10 @@ function visualFilter(
     )
     return outputLabel
   }
-  const { source } = request
-  const geometry = visualGeometry(overlay, source.width, source.height)
+  const { canvas } = request
+  const geometry = visualGeometry(overlay, canvas.width, canvas.height)
   const fullScreen = fillsFrame(overlay)
-  const scale = visualScale(fullScreen, geometry, source.width, source.height)
+  const scale = visualScale(fullScreen, geometry, canvas.width, canvas.height)
   const position = fullScreen ? { x: 0, y: 0 } : geometry
   const trim = 'sourceIn' in overlay
     ? `trim=start=${seconds(overlay.sourceIn)}:end=${seconds(overlay.sourceIn + overlay.duration)}`
@@ -216,15 +221,39 @@ function nearKeyframe(time: number, frames: number[], tolerance: number, duratio
   return frames.some((frame) => Math.abs(frame - time) <= tolerance)
 }
 
+function soleTimelineSource(request: ExportRequest): ExportRequest['sources'][number] | null {
+  const sourceId = request.segments[0]?.sourceId
+  if (!sourceId || request.segments.some((segment) => segment.sourceId !== sourceId)) return null
+  return request.sources.find((source) => source.id === sourceId) ?? null
+}
+
+function preservesSourceFormat(request: ExportRequest, source: ExportRequest['sources'][number]['metadata']): boolean {
+  return request.canvas.fit === 'contain'
+    && request.canvas.width === source.width
+    && request.canvas.height === source.height
+    && Math.abs(request.canvas.fps - source.fps) <= 0.01
+}
+
+function segmentsAreKeyframeSafe(request: ExportRequest, frames: number[], tolerance: number, duration: number): boolean {
+  return request.segments.every((segment) =>
+    nearKeyframe(segment.sourceStart, frames, tolerance, duration)
+    && nearKeyframe(segment.sourceEnd, frames, tolerance, duration)
+  )
+}
+
+function frameTolerance(fps: number): number {
+  return Math.max(0.05, fps > 0 ? 1 / fps : 0.05)
+}
+
 async function canStreamCopy(request: ExportRequest): Promise<boolean> {
   if (request.overlays.length > 0) return false
-  if (!['h264', 'hevc', 'av1', 'vp9'].includes(request.source.videoCodec)) return false
-  const frames = await keyframes(request.source.path)
-  const tolerance = Math.max(0.05, request.source.fps > 0 ? 1 / request.source.fps : 0.05)
-  return request.segments.every((segment) =>
-    nearKeyframe(segment.sourceStart, frames, tolerance, request.source.duration)
-    && nearKeyframe(segment.sourceEnd, frames, tolerance, request.source.duration)
-  )
+  const timelineSource = soleTimelineSource(request)
+  if (!timelineSource) return false
+  const source = timelineSource.metadata
+  if (!['h264', 'hevc', 'av1', 'vp9'].includes(source.videoCodec)) return false
+  if (!preservesSourceFormat(request, source)) return false
+  const frames = await keyframes(source.path)
+  return segmentsAreKeyframeSafe(request, frames, frameTolerance(source.fps), source.duration)
 }
 
 function concatPath(path: string): string {
@@ -234,7 +263,8 @@ function concatPath(path: string): string {
 async function ensureDiskSpace(request: ExportRequest): Promise<void> {
   const available = await statfs(dirname(request.outputPath))
   const free = available.bavail * available.bsize
-  const estimated = Math.max(512 * 1024 * 1024, request.source.size * 1.5)
+  const sourceSize = request.sources.reduce((sum, source) => sum + source.metadata.size, 0)
+  const estimated = Math.max(512 * 1024 * 1024, sourceSize * 1.5)
   if (free < estimated) {
     throw new Error(`Not enough free disk space. Approximately ${Math.ceil(estimated / 1024 / 1024)} MB is required.`)
   }
@@ -297,7 +327,9 @@ async function streamCopy(
   const concatFile = join(directory, 'segments.ffconcat')
   const lines = ['ffconcat version 1.0']
   for (const segment of request.segments) {
-    lines.push(`file '${concatPath(request.source.path)}'`)
+    const source = request.sources.find((candidate) => candidate.id === segment.sourceId)
+    if (!source) throw new Error('A timeline video source is missing')
+    lines.push(`file '${concatPath(source.metadata.path)}'`)
     lines.push(`inpoint ${seconds(segment.sourceStart)}`)
     lines.push(`outpoint ${seconds(segment.sourceEnd)}`)
   }
@@ -318,11 +350,12 @@ async function prepareInputs(request: ExportRequest, directory: string): Promise
   inputArgs: string[]
   preparedInputs: PreparedInput[]
 }> {
-  const inputArgs = ['-hide_banner', '-y', '-i', request.source.path]
+  const inputArgs = ['-hide_banner', '-y']
+  for (const source of request.sources) inputArgs.push('-i', source.metadata.path)
   const preparedInputs: PreparedInput[] = []
   for (const [offset, overlay] of request.overlays.entries()) {
     inputArgs.push(...await overlayInputArgs(overlay, directory))
-    preparedInputs.push({ overlay, index: offset + 1 })
+    preparedInputs.push({ overlay, index: offset + request.sources.length })
   }
   return { inputArgs, preparedInputs }
 }

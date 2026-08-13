@@ -1,10 +1,10 @@
 # CatCut
 
-CatCut is a small, fast video editor for Ubuntu. It is designed for trimming long videos and adding the text, reaction clips, pictures, and sound effects commonly used in YouTube videos.
+CatCut is a small, fast video editor for Ubuntu. It trims and combines videos and adds the text, reaction clips, pictures, and sound effects commonly used in YouTube videos.
 
 ## Main features
 
-- Open large and hour-long videos without loading the whole file into memory.
+- Open videos without loading the whole file into memory.
 - Remove any number of unwanted ranges with simple cut points.
 - Add timed text, images, videos, and audio.
 - Move and resize visual overlays directly on the preview.
@@ -48,11 +48,11 @@ CatCut still works without the pack; use **New** to add your own media.
 
 ## Basic editing
 
-1. Drop a video into CatCut or choose **Open video**.
+1. Drop a video into CatCut or choose **Open**.
 2. Move the playhead and press **Cut point** around an unwanted section.
 3. Move the playhead into the highlighted section and press **Cut**.
 4. Add text or choose an image, video, or audio item from the left panel.
-5. Choose **Export video**.
+5. Choose **Export**.
 
 Open and Export start in Videos. New media starts in Downloads. Each remembers its last folder only until CatCut closes. Export blocks editing while it runs and can be cancelled safely.
 

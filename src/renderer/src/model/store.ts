@@ -5,6 +5,8 @@ import type {
   GpuDiagnostics,
   JobProgress,
   Overlay,
+  SavedSession,
+  TimelineSource,
   VideoOverlay
 } from '@shared/types'
 import {
@@ -12,8 +14,10 @@ import {
   createSession,
   cutPointsAfterRemoval,
   defaultTextOverlay,
-  makeId,
   deletionRange,
+  insertSourceAtOutputTime,
+  makeId,
+  primarySource,
   removeOutputRange,
   timelineDuration
 } from './timeline'
@@ -30,7 +34,10 @@ export interface EditorState {
   busy: string | null
   error: string | null
   initialize: () => Promise<void>
-  loadVideo: (path?: string) => Promise<void>
+  loadVideo: (path?: string, short?: boolean) => Promise<void>
+  openShort: () => Promise<void>
+  insertVideo: () => Promise<void>
+  resetProject: () => Promise<void>
   setPlayhead: (time: number) => void
   setPlaybackPath: (path: string) => Promise<void>
   selectPoint: () => void
@@ -83,7 +90,53 @@ function patchedOverlaySession(session: EditSession, id: string, patch: Partial<
   }
 }
 
-export const useEditorStore = create<EditorState>((set, get) => ({
+export function savedSession(session: EditSession): SavedSession {
+  return {
+    canvas: session.canvas,
+    sources: session.sources.map(({ id, metadata }) => ({ id, metadata })),
+    segments: session.segments,
+    overlays: session.overlays,
+    selectedOverlayId: session.selectedOverlayId,
+    playhead: session.playhead,
+    cutPoints: session.cutPoints,
+    dirty: session.dirty
+  }
+}
+
+async function restoredSession(saved: SavedSession): Promise<EditSession> {
+  const sources = await Promise.all(saved.sources.map(async (source) => ({
+    ...source,
+    playbackPath: await window.catcut.getPathUrl(source.metadata.path),
+    waveform: []
+  })))
+  return { ...saved, sources }
+}
+
+export const useEditorStore = create<EditorState>((set, get) => {
+  const patchSource = (id: string, patch: Partial<TimelineSource>): void => set((state) => state.session ? {
+    session: {
+      ...state.session,
+      sources: state.session.sources.map((source) => source.id === id ? { ...source, ...patch } : source)
+    }
+  } : state)
+
+  const loadWaveform = (source: TimelineSource): void => {
+    if (!source.metadata.hasAudio) return
+    void window.catcut.waveform(source.metadata.path)
+      .then((waveform) => patchSource(source.id, { waveform }))
+      .catch(() => undefined)
+  }
+
+  const prepareProxy = async (source: TimelineSource, busy: string | null, error: string): Promise<void> => {
+    if (!await window.catcut.shouldProxy(source.metadata)) return
+    if (busy) set({ busy })
+    void window.catcut.createProxy(source.metadata).then(async ({ result }) => {
+      patchSource(source.id, { playbackPath: await window.catcut.getPathUrl(result.path) })
+      if (busy) set({ busy: null })
+    }).catch(() => set({ busy: null, error }))
+  }
+
+  return ({
   initialized: false,
   session: null,
   history: [],
@@ -97,48 +150,73 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
   async initialize() {
     try {
-      const [gpu, assets] = await Promise.all([
+      const [gpu, assets, saved] = await Promise.all([
         window.catcut.getGpuDiagnostics(),
-        window.catcut.scanAssets()
+        window.catcut.scanAssets(),
+        window.catcut.loadSession()
       ])
-      set({ gpu, assets, initialized: true })
+      const session = saved ? await restoredSession(saved) : null
+      set({ gpu, assets, session, initialized: true })
+      session?.sources.forEach(loadWaveform)
     } catch {
       set({ initialized: true, error: 'CatCut could not finish starting. Close it and try again.' })
     }
   },
 
-  async loadVideo(providedPath) {
+  async loadVideo(providedPath, short = false) {
     try {
       const path = providedPath ?? await window.catcut.openVideo()
       if (!path) return
       set({ busy: 'Opening video…', error: null })
       const metadata = await window.catcut.probe(path)
       const url = await window.catcut.getPathUrl(path)
-      const session = createSession(metadata)
-      session.playbackPath = url
+      const session = createSession(metadata, short)
+      const source = primarySource(session)
+      source.playbackPath = url
       set({ session, history: [], future: [], gesture: null, busy: null })
-      if (metadata.hasAudio) {
-        void window.catcut.waveform(path).then((waveform) => {
-          const current = get().session
-          if (current?.source.path === path) set({ session: { ...current, waveform } })
-        }).catch(() => undefined)
-      }
-
-      if (await window.catcut.shouldProxy(metadata)) {
-        set({ busy: 'Preparing video for smooth playback…' })
-        void window.catcut.createProxy(metadata).then(async ({ result }) => {
-          const proxyUrl = await window.catcut.getPathUrl(result.path)
-          const current = get().session
-          if (current?.source.path === metadata.path) {
-            set({ session: { ...current, playbackPath: proxyUrl }, busy: null })
-          }
-        }).catch(() => {
-          set({ busy: null, error: 'Playback preparation failed. The video will still open, but playback may be slower.' })
-        })
-      }
+      loadWaveform(source)
+      await prepareProxy(
+        source,
+        'Preparing video for smooth playback…',
+        'Playback preparation failed. The video will still open, but playback may be slower.'
+      )
     } catch {
       set({ busy: null, error: 'CatCut could not open this video. Try another file.' })
     }
+  },
+
+  async openShort() {
+    await get().loadVideo(undefined, true)
+  },
+
+  async insertVideo() {
+    const path = await window.catcut.openVideo()
+    if (!path || !get().session) return
+    try {
+      set({ busy: 'Inserting video…', error: null })
+      const [metadata, playbackPath] = await Promise.all([
+        window.catcut.probe(path),
+        window.catcut.getPathUrl(path)
+      ])
+      const sourceId = makeId('source')
+      const source: TimelineSource = { id: sourceId, metadata, playbackPath, waveform: [] }
+      set((state) => {
+        if (!state.session) return { busy: null }
+        return {
+          ...mutation(state, (session) => insertSourceAtOutputTime(session, source, session.playhead)),
+          busy: null
+        }
+      })
+      loadWaveform(source)
+      await prepareProxy(source, null, 'Playback preparation failed for the inserted video. It may play less smoothly.')
+    } catch {
+      set({ busy: null, error: 'CatCut could not insert this video. Try another file.' })
+    }
+  },
+
+  async resetProject() {
+    await window.catcut.resetSession()
+    set({ session: null, history: [], future: [], gesture: null, job: null, busy: null, error: null })
   },
 
   setPlayhead(time) {
@@ -151,7 +229,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
   async setPlaybackPath(path) {
     const url = await window.catcut.getPathUrl(path)
-    set((state) => state.session ? { session: { ...state.session, playbackPath: url } } : state)
+    set((state) => state.session ? {
+      session: {
+        ...state.session,
+        sources: state.session.sources.map((source, index) => index === 0 ? { ...source, playbackPath: url } : source)
+      }
+    } : state)
   },
 
   selectPoint() {
@@ -341,7 +424,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   markExported() {
     set((state) => state.session ? { session: { ...state.session, dirty: false } } : state)
   }
-}))
+  })
+})
 
 export function selectedOverlay(session: EditSession | null): Overlay | null {
   return session?.overlays.find((overlay) => overlay.id === session.selectedOverlayId) ?? null

@@ -26,8 +26,26 @@ export interface AssetMetadata {
 
 export interface SourceSegment {
   id: string
+  sourceId: string
   sourceStart: number
   sourceEnd: number
+}
+
+export interface ExportSource {
+  id: string
+  metadata: MediaMetadata
+}
+
+export interface TimelineSource extends ExportSource {
+  playbackPath: string
+  waveform: number[]
+}
+
+export interface ProjectCanvas {
+  width: number
+  height: number
+  fps: number
+  fit: 'contain' | 'cover'
 }
 
 interface OverlayBase {
@@ -98,11 +116,10 @@ export interface AudioOverlay extends OverlayBase {
 export type Overlay = TextOverlay | ImageOverlay | GifOverlay | VideoOverlay | AudioOverlay
 
 export interface EditSession {
-  source: MediaMetadata
-  playbackPath: string
+  canvas: ProjectCanvas
+  sources: TimelineSource[]
   segments: SourceSegment[]
   overlays: Overlay[]
-  waveform: number[]
   selectedOverlayId: string | null
   playhead: number
   cutPoints: number[]
@@ -110,10 +127,22 @@ export interface EditSession {
 }
 
 export interface ExportRequest {
-  source: MediaMetadata
+  canvas: ProjectCanvas
+  sources: ExportSource[]
   outputPath: string
   segments: SourceSegment[]
   overlays: Overlay[]
+}
+
+export interface SavedSession {
+  canvas: ProjectCanvas
+  sources: ExportSource[]
+  segments: SourceSegment[]
+  overlays: Overlay[]
+  selectedOverlayId: string | null
+  playhead: number
+  cutPoints: number[]
+  dirty: boolean
 }
 
 export type JobKind = 'proxy' | 'export' | 'thumbnail' | 'waveform' | 'asset-pack'
@@ -170,11 +199,16 @@ export interface CatCutApi {
   scanAssets: () => Promise<AssetItem[]>
   chooseExportPath: (defaultName: string) => Promise<string | null>
   exportVideo: (request: ExportRequest) => Promise<{ jobId: string; outputPath: string }>
+  loadSession: () => Promise<SavedSession | null>
+  saveSession: (session: SavedSession) => Promise<void>
+  resetSession: () => Promise<void>
   cancelJob: (id: string) => Promise<boolean>
   getGpuDiagnostics: () => Promise<GpuDiagnostics>
   getPathUrl: (path: string) => Promise<string>
   getSvgDataUrl: (path: string) => Promise<string>
   getDroppedPath: (file: File) => Promise<string>
   onOpenPath: (callback: (path: string) => void) => () => void
+  onResetProject: (callback: () => void) => () => void
   onJobProgress: (callback: (progress: JobProgress) => void) => () => void
+  onSaveRequest: (callback: () => Promise<void>) => () => void
 }

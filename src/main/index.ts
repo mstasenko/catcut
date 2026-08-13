@@ -5,9 +5,11 @@ import {
   BrowserWindow,
   dialog,
   ipcMain,
+  Menu,
   protocol
 } from 'electron'
-import type { ExportRequest, GpuDiagnostics, Overlay } from '../types'
+import packageMetadata from '../../package.json'
+import type { ExportRequest, GpuDiagnostics, Overlay, SavedSession } from '../types'
 import { categoryFor, displayName, scanAssets } from './assets'
 import { exportVideo } from './exporter'
 import { jobs } from './jobs'
@@ -15,6 +17,7 @@ import { createProxy, mediaNeedsProxy, probeAsset, probeMedia, waveformFor } fro
 import { mediaResponse, mediaUrl } from './media-protocol'
 import { installDesktopIntegration } from './desktop'
 import { SessionDirectory } from './session-directory'
+import { loadSessionFile, resetSessionFile, saveSessionFile } from './session-state'
 import { initialWindowSize } from './window-options'
 import { SessionPathRegistry } from './path-registry'
 import { svgDataUrl } from './svg'
@@ -23,7 +26,8 @@ import {
   parseExportRequest,
   parseJobId,
   parseMediaMetadata,
-  parsePath
+  parsePath,
+  parseSavedSession
 } from './validation'
 
 protocol.registerSchemesAsPrivileged([
@@ -43,6 +47,12 @@ if (headlessTest) {
   // clock active so GUI automation can perform normal actionability checks.
   app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
   app.commandLine.appendSwitch('disable-renderer-backgrounding')
+}
+
+function startupVideo(): string | undefined {
+  return process.argv.find((argument, index) =>
+    index > 0 && /\.(mp4|mov|mkv|webm|m4v|avi)$/i.test(argument)
+  )
 }
 
 async function gpuName(): Promise<string> {
@@ -103,15 +113,32 @@ function createWindow(paths: SessionPathRegistry): BrowserWindow {
   window.once('ready-to-show', () => window.show())
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   window.webContents.on('will-navigate', (event) => event.preventDefault())
+  Menu.setApplicationMenu(Menu.buildFromTemplate([{
+    label: 'Project',
+    submenu: [
+      { label: `CatCut ${packageMetadata.version}`, enabled: false },
+      { type: 'separator' },
+      { label: 'Reset project', click: () => window.webContents.send('project:reset-request') }
+    ]
+  }]))
+  // Give the sandboxed renderer one bounded chance to persist before normal close.
+  let closeReady = false
+  window.on('close', (event) => {
+    if (closeReady) return
+    event.preventDefault()
+    window.webContents.send('session:save-request')
+  })
+  ipcMain.once(`session:close-ready:${window.id}`, () => {
+    closeReady = true
+    window.close()
+  })
 
   if (process.env.ELECTRON_RENDERER_URL) {
     void window.loadURL(process.env.ELECTRON_RENDERER_URL)
   } else {
     void window.loadFile(join(__dirname, '../renderer/index.html'))
   }
-  const requestedPath = process.argv.find((argument, index) =>
-    index > 0 && /\.(mp4|mov|mkv|webm|m4v|avi)$/i.test(argument)
-  )
+  const requestedPath = startupVideo()
   if (requestedPath) {
     window.webContents.once('did-finish-load', () => {
       void paths.allowRead(resolve(requestedPath)).then((path) => window.webContents.send('app:open-path', path))
@@ -151,12 +178,50 @@ function authorizeOverlay(overlay: Overlay, paths: SessionPathRegistry): Overlay
 
 async function trustedExport(value: unknown, paths: SessionPathRegistry): Promise<ExportRequest> {
   const supplied = parseExportRequest(value)
-  const sourcePath = paths.assertReadable(supplied.source.path)
-  const request = parseExportRequest({ ...supplied, source: await probeMedia(sourcePath) })
+  const sources = await Promise.all(supplied.sources.map(async (source) => ({
+    id: source.id,
+    metadata: await probeMedia(paths.assertReadable(source.metadata.path))
+  })))
+  const request = parseExportRequest({
+    ...supplied,
+    sources
+  })
   return {
     ...request,
     outputPath: paths.assertWritable(request.outputPath),
     overlays: request.overlays.map((overlay) => authorizeOverlay(overlay, paths))
+  }
+}
+
+function statePath(): string {
+  return join(app.getPath('userData'), 'editor-state.json')
+}
+
+function authorizeSavedSession(session: SavedSession, paths: SessionPathRegistry): SavedSession {
+  session.sources.forEach((source) => paths.assertReadable(source.metadata.path))
+  session.overlays.forEach((overlay) => authorizeOverlay(overlay, paths))
+  return session
+}
+
+async function saveSession(value: unknown, paths: SessionPathRegistry): Promise<void> {
+  const session = authorizeSavedSession(parseSavedSession(value), paths)
+  await saveSessionFile(statePath(), session)
+}
+
+async function loadSession(paths: SessionPathRegistry): Promise<SavedSession | null> {
+  try {
+    const saved = await loadSessionFile(statePath())
+    if (!saved) return null
+    const sources = await Promise.all(saved.sources.map(async (source) => ({
+      id: source.id,
+      metadata: await probeMedia(await paths.allowRead(source.metadata.path))
+    })))
+    const overlays = await Promise.all(saved.overlays.map(async (overlay) => overlay.type === 'text'
+      ? overlay
+      : { ...overlay, path: await paths.allowRead(overlay.path) }))
+    return parseSavedSession({ ...saved, sources, overlays })
+  } catch {
+    return null
   }
 }
 
@@ -169,13 +234,14 @@ async function trustedAssetMetadata(path: string, paths: SessionPathRegistry): P
 
 function registerIpc(directories: DialogDirectories, paths: SessionPathRegistry): void {
   ipcMain.handle('dialog:open-video', async () => {
-    const result = await dialog.showOpenDialog({
+    const testSelection = process.env.CATCUT_E2E_VIDEO
+    const result = testSelection ? { filePaths: [testSelection] } : await dialog.showOpenDialog({
       title: 'Open a video',
       defaultPath: directories.open.defaultPath(),
       properties: ['openFile'],
       filters: [{ name: 'Video', extensions: ['mp4', 'mov', 'mkv', 'webm', 'm4v', 'avi'] }]
     })
-    const selected = result.filePaths[0]
+    const selected = testSelection ?? result.filePaths[0]
     if (!selected) return null
     const path = await paths.allowRead(selected)
     directories.open.remember(path)
@@ -238,6 +304,13 @@ function registerIpc(directories: DialogDirectories, paths: SessionPathRegistry)
   ipcMain.handle('media:url', (_event, value: unknown) => mediaUrl(paths.assertReadable(parsePath(value))))
   ipcMain.handle('media:svg-data', (_event, value: unknown) => svgDataUrl(paths.assertReadable(parsePath(value))))
   ipcMain.handle('assets:scan', () => authorizedAssets(paths))
+  ipcMain.handle('session:load', () => startupVideo() ? null : loadSession(paths))
+  ipcMain.handle('session:save', (_event, value: unknown) => saveSession(value, paths))
+  ipcMain.handle('session:reset', () => resetSessionFile(statePath()))
+  ipcMain.on('session:close-ready', (event) => {
+    const window = BrowserWindow.fromWebContents(event.sender)
+    if (window) ipcMain.emit(`session:close-ready:${window.id}`)
+  })
   ipcMain.handle('export:start', async (_event, value: unknown) => exportVideo(await trustedExport(value, paths)))
   ipcMain.handle('job:cancel', (_event, value: unknown) => jobs.cancel(parseJobId(value)))
   ipcMain.handle('gpu:diagnostics', gpuDiagnostics)

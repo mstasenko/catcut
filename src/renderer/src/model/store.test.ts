@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { CatCutApi, MediaMetadata } from '@shared/types'
-import { isVideoOverlay, selectedOverlay, useEditorStore } from './store'
+import { isVideoOverlay, savedSession, selectedOverlay, useEditorStore } from './store'
+import { createSession } from './timeline'
 
 const metadata: MediaMetadata = {
   path: '/source.mp4', name: 'source.mp4', size: 100, modifiedAt: 1, duration: 10,
@@ -20,13 +21,18 @@ function api(): CatCutApi {
     scanAssets: vi.fn().mockResolvedValue([]),
     chooseExportPath: vi.fn().mockResolvedValue('/output.mp4'),
     exportVideo: vi.fn().mockResolvedValue({ jobId: 'export', outputPath: '/output.mp4' }),
+    loadSession: vi.fn().mockResolvedValue(null),
+    saveSession: vi.fn().mockResolvedValue(undefined),
+    resetSession: vi.fn().mockResolvedValue(undefined),
     cancelJob: vi.fn().mockResolvedValue(true),
     getGpuDiagnostics: vi.fn().mockResolvedValue({ sessionType: 'wayland', desktop: 'GNOME', waylandDisplay: 'wayland-0', hardwareAcceleration: true, videoDecode: 'enabled', gpuCompositing: 'enabled', gpuName: 'Intel' }),
     getPathUrl: vi.fn((path: string) => Promise.resolve(`catcut:${path}`)),
     getSvgDataUrl: vi.fn((path: string) => Promise.resolve(`data:image/svg+xml,${path}`)),
     getDroppedPath: vi.fn().mockResolvedValue('/drop.mp4'),
     onOpenPath: vi.fn(() => () => undefined),
-    onJobProgress: vi.fn(() => () => undefined)
+    onResetProject: vi.fn(() => () => undefined),
+    onJobProgress: vi.fn(() => () => undefined),
+    onSaveRequest: vi.fn(() => () => undefined)
   }
 }
 
@@ -45,11 +51,67 @@ describe('editor store', () => {
     expect(useEditorStore.getState().gpu?.videoDecode).toBe('enabled')
   })
 
+  it('restores a saved multi-source project and reloads its waveform', async () => {
+    const session = createSession(metadata)
+    const inserted = { ...metadata, path: '/inserted.mp4', name: 'inserted.mp4' }
+    session.sources.push({ id: 'inserted', metadata: inserted, playbackPath: inserted.path, waveform: [] })
+    vi.mocked(window.catcut.loadSession).mockResolvedValue(savedSession(session))
+    await useEditorStore.getState().initialize()
+    await vi.waitFor(() => expect(useEditorStore.getState().session?.sources[0]?.waveform).toEqual([0.1, 0.8]))
+    expect(useEditorStore.getState().session?.sources.map((source) => source.playbackPath)).toEqual([
+      'catcut:/source.mp4', 'catcut:/inserted.mp4'
+    ])
+  })
+
+  it('inserts a video at the playhead and undoes the ripple edit', async () => {
+    await useEditorStore.getState().loadVideo('/source.mp4')
+    useEditorStore.getState().setPlayhead(4)
+    const inserted = { ...metadata, path: '/inserted.mp4', name: 'inserted.mp4', duration: 2 }
+    vi.mocked(window.catcut.openVideo).mockResolvedValue('/inserted.mp4')
+    vi.mocked(window.catcut.probe).mockResolvedValueOnce(inserted)
+    await useEditorStore.getState().insertVideo()
+    const session = useEditorStore.getState().session
+    expect(session?.sources).toHaveLength(2)
+    expect(session?.segments.map((segment) => segment.sourceEnd - segment.sourceStart)).toEqual([4, 2, 6])
+    expect(session?.segments[1]?.sourceId).toBe(session?.sources[1]?.id)
+    useEditorStore.getState().undo()
+    expect(useEditorStore.getState().session?.segments).toHaveLength(1)
+  })
+
+  it('handles cancelled, proxied, and failed insertions', async () => {
+    vi.mocked(window.catcut.openVideo).mockResolvedValueOnce(null)
+    await useEditorStore.getState().insertVideo()
+    expect(useEditorStore.getState().session).toBeNull()
+
+    await useEditorStore.getState().loadVideo('/source.mp4')
+    const inserted = { ...metadata, path: '/inserted.mp4', name: 'inserted.mp4', duration: 2 }
+    vi.mocked(window.catcut.openVideo).mockResolvedValue('/inserted.mp4')
+    vi.mocked(window.catcut.probe).mockResolvedValueOnce(inserted)
+    vi.mocked(window.catcut.shouldProxy).mockResolvedValueOnce(true)
+    vi.mocked(window.catcut.createProxy).mockResolvedValueOnce({
+      jobId: 'insert-proxy', result: { path: '/insert-proxy.mp4', cacheHit: false }
+    })
+    await useEditorStore.getState().insertVideo()
+    await vi.waitFor(() => expect(useEditorStore.getState().session?.sources[1]?.playbackPath).toBe('catcut:/insert-proxy.mp4'))
+
+    vi.mocked(window.catcut.probe).mockRejectedValueOnce(new Error('bad video'))
+    await useEditorStore.getState().insertVideo()
+    expect(useEditorStore.getState().error).toBe('CatCut could not insert this video. Try another file.')
+  })
+
+  it('opens a Short project and resets saved and in-memory state', async () => {
+    await useEditorStore.getState().openShort()
+    expect(useEditorStore.getState().session?.canvas).toEqual({ width: 1080, height: 1920, fps: 30, fit: 'cover' })
+    await useEditorStore.getState().resetProject()
+    expect(window.catcut.resetSession).toHaveBeenCalledOnce()
+    expect(useEditorStore.getState().session).toBeNull()
+  })
+
   it('loads media, edits the timeline, and supports undo/redo', async () => {
     const store = useEditorStore.getState()
     await store.loadVideo()
-    expect(useEditorStore.getState().session?.playbackPath).toBe('catcut:/source.mp4')
-    await vi.waitFor(() => expect(useEditorStore.getState().session?.waveform).toEqual([0.1, 0.8]))
+    expect(useEditorStore.getState().session?.sources[0]?.playbackPath).toBe('catcut:/source.mp4')
+    await vi.waitFor(() => expect(useEditorStore.getState().session?.sources[0]?.waveform).toEqual([0.1, 0.8]))
     useEditorStore.getState().setPlayhead(4)
     useEditorStore.getState().selectPoint()
     useEditorStore.getState().undo()
@@ -122,7 +184,7 @@ describe('editor store', () => {
   it('switches to an automatically generated proxy', async () => {
     vi.mocked(window.catcut.shouldProxy).mockResolvedValue(true)
     await useEditorStore.getState().loadVideo('/source.mp4')
-    await vi.waitFor(() => expect(useEditorStore.getState().session?.playbackPath).toBe('catcut:/proxy.mp4'))
+    await vi.waitFor(() => expect(useEditorStore.getState().session?.sources[0]?.playbackPath).toBe('catcut:/proxy.mp4'))
   })
 
   it('adds external audio assets', async () => {
@@ -157,7 +219,7 @@ describe('editor store', () => {
     useEditorStore.getState().clearSelection()
     expect(useEditorStore.getState().session?.cutPoints).toEqual([])
     await useEditorStore.getState().setPlaybackPath('/manual-proxy.mp4')
-    expect(useEditorStore.getState().session?.playbackPath).toBe('catcut:/manual-proxy.mp4')
+    expect(useEditorStore.getState().session?.sources[0]?.playbackPath).toBe('catcut:/manual-proxy.mp4')
     vi.mocked(window.catcut.probeAsset)
       .mockResolvedValueOnce({ duration: 2, width: 320, height: 180, hasAudio: false })
       .mockResolvedValueOnce({ duration: 2, width: 320, height: 180, hasAudio: false, playbackPath: '/gif-preview.mp4' })
@@ -204,7 +266,7 @@ describe('editor store', () => {
     vi.mocked(window.catcut.createProxy).mockRejectedValueOnce(new Error('encoder unavailable'))
     await useEditorStore.getState().loadVideo('/source.mp4')
     await vi.waitFor(() => expect(useEditorStore.getState().error).toContain('Playback preparation failed'))
-    expect(useEditorStore.getState().session?.playbackPath).toBe('catcut:/source.mp4')
+    expect(useEditorStore.getState().session?.sources[0]?.playbackPath).toBe('catcut:/source.mp4')
 
     vi.mocked(window.catcut.probeAsset).mockRejectedValueOnce(new Error('bad asset'))
     await useEditorStore.getState().addAsset({ id: 'x', type: 'image', name: 'Bad', path: '/bad.png', source: 'external' })

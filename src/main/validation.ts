@@ -1,5 +1,13 @@
 import { basename } from 'node:path'
-import type { ExportRequest, MediaMetadata, Overlay, SourceSegment } from '../types'
+import type {
+  ExportRequest,
+  ExportSource,
+  MediaMetadata,
+  Overlay,
+  ProjectCanvas,
+  SavedSession,
+  SourceSegment
+} from '../types'
 
 type UnknownRecord = Record<string, unknown>
 
@@ -73,12 +81,34 @@ export function parseMediaMetadata(value: unknown): MediaMetadata {
   }
 }
 
-function parseSegment(value: unknown, sourceDuration: number): SourceSegment {
+function parseProjectCanvas(value: unknown): ProjectCanvas {
+  const input = record(value, 'Project canvas')
+  return {
+    width: number(input.width, 'Canvas width', 2, 100_000),
+    height: number(input.height, 'Canvas height', 2, 100_000),
+    fps: number(input.fps, 'Canvas frame rate', 1, 1000),
+    fit: oneOf(input.fit, ['contain', 'cover'] as const, 'Canvas fit')
+  }
+}
+
+function parseExportSource(value: unknown): ExportSource {
+  const input = record(value, 'Video source')
+  return {
+    id: identifier(input.id, 'Source ID'),
+    metadata: parseMediaMetadata(input.metadata)
+  }
+}
+
+function parseSegment(value: unknown, sources: Map<string, MediaMetadata>): SourceSegment {
   const input = record(value, 'Timeline segment')
+  const sourceId = identifier(input.sourceId, 'Segment source ID')
+  const source = sources.get(sourceId)
+  if (!source) throw new Error('Timeline segment refers to an unknown video source')
+  const sourceDuration = source.duration
   const sourceStart = number(input.sourceStart, 'Segment start', 0, sourceDuration)
   const sourceEnd = number(input.sourceEnd, 'Segment end', 0, sourceDuration)
   if (sourceEnd <= sourceStart) throw new Error('Timeline segments must have positive duration')
-  return { id: identifier(input.id, 'Segment ID'), sourceStart, sourceEnd }
+  return { id: identifier(input.id, 'Segment ID'), sourceId, sourceStart, sourceEnd }
 }
 
 function validateOverlayBase(input: UnknownRecord, timelineDuration: number): void {
@@ -174,15 +204,59 @@ function validateOverlay(value: unknown, timelineDuration: number): Overlay {
 
 export function parseExportRequest(value: unknown): ExportRequest {
   const input = record(value, 'Export request')
-  const source = parseMediaMetadata(input.source)
-  if (!Array.isArray(input.segments) || input.segments.length > 10_000) {
+  const canvas = parseProjectCanvas(input.canvas)
+  const sources = parseSources(input.sources)
+  const sourcesById = new Map(sources.map((item) => [item.id, item.metadata]))
+  const segments = parseSegments(input.segments, sourcesById)
+  const duration = segments.reduce((total, segment) => total + segment.sourceEnd - segment.sourceStart, 0)
+  const overlays = parseOverlays(input.overlays, duration)
+  return { canvas, sources, outputPath: parsePath(input.outputPath), segments, overlays }
+}
+
+function parseSources(value: unknown): ExportSource[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 10_000) {
+    throw new Error('Video sources must be a non-empty array')
+  }
+  const sources = value.map(parseExportSource)
+  const sourcesById = new Map(sources.map((item) => [item.id, item.metadata]))
+  if (sourcesById.size !== sources.length) throw new Error('Video source IDs must be unique')
+  return sources
+}
+
+function parseSegments(value: unknown, sources: Map<string, MediaMetadata>): SourceSegment[] {
+  if (!Array.isArray(value) || value.length > 10_000) {
     throw new Error('Timeline segments must be an array')
   }
-  const segments = input.segments.map((segment) => parseSegment(segment, source.duration))
-  const timelineDuration = segments.reduce((total, segment) => total + segment.sourceEnd - segment.sourceStart, 0)
-  if (!Array.isArray(input.overlays) || input.overlays.length > 10_000) {
+  return value.map((segment) => parseSegment(segment, sources))
+}
+
+function parseOverlays(value: unknown, duration: number): Overlay[] {
+  if (!Array.isArray(value) || value.length > 10_000) {
     throw new Error('Overlays must be an array')
   }
-  const overlays = input.overlays.map((overlay) => validateOverlay(overlay, timelineDuration))
-  return { source, outputPath: parsePath(input.outputPath), segments, overlays }
+  return value.map((overlay) => validateOverlay(overlay, duration))
+}
+
+export function parseSavedSession(value: unknown): SavedSession {
+  const input = record(value, 'Saved session')
+  const timeline = parseExportRequest({ ...input, outputPath: '/saved-session.mp4' })
+  const duration = timeline.segments.reduce((sum, segment) => sum + segment.sourceEnd - segment.sourceStart, 0)
+  const selectedOverlayId = input.selectedOverlayId === null
+    ? null
+    : identifier(input.selectedOverlayId, 'Selected overlay ID')
+  const cutPointsInput = input.cutPoints
+  if (!Array.isArray(cutPointsInput) || cutPointsInput.length > 10_000) {
+    throw new Error('Cut points must be an array')
+  }
+  const cutPoints = cutPointsInput.map((point) => number(point, 'Cut point', 0, duration))
+  return {
+    canvas: timeline.canvas,
+    sources: timeline.sources,
+    segments: timeline.segments,
+    overlays: timeline.overlays,
+    selectedOverlayId,
+    playhead: number(input.playhead, 'Playhead', 0, duration),
+    cutPoints,
+    dirty: boolean(input.dirty, 'Dirty state')
+  }
 }

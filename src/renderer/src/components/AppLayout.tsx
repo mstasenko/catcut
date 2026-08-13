@@ -2,6 +2,7 @@ import { useState } from 'react'
 import type { EditSession, GpuDiagnostics, JobProgress, Overlay } from '@shared/types'
 import catcutIcon from '../../../catcut-icon.png'
 import type { EditorState } from '../model/store'
+import { primarySource } from '../model/timeline'
 import { AssetPanel } from './AssetPanel'
 import type { AssetCategory } from './AssetPanel'
 import { Inspector } from './Inspector'
@@ -76,8 +77,24 @@ export function Welcome({ onOpen }: { onOpen: () => void }): React.JSX.Element {
   )
 }
 
-function SidePanel({ store, selected, duration, exporting, onExport }: {
+function ProjectActions({ store, exporting, onExport }: {
   store: EditorState
+  exporting: boolean
+  onExport: () => void
+}): React.JSX.Element {
+  return (
+    <div className="project-actions">
+      <button onClick={() => void store.loadVideo()}>Open</button>
+      <button onClick={() => void store.openShort()}>Open Short</button>
+      <button disabled={exporting} onClick={() => void store.insertVideo()}>Insert video</button>
+      <button className="export-button" disabled={exporting} onClick={onExport}>{exporting ? 'Exporting…' : 'Export'}</button>
+    </div>
+  )
+}
+
+function SidePanel({ store, session, selected, duration, exporting, onExport }: {
+  store: EditorState
+  session: EditSession
   selected: Overlay | null
   duration: number
   exporting: boolean
@@ -87,17 +104,16 @@ function SidePanel({ store, selected, duration, exporting, onExport }: {
   return (
     <aside className="side-panel">
       <div className="side-brand"><img src={catcutIcon} alt="" /><strong>CatCut</strong></div>
-      <div className="project-actions">
-        <button onClick={() => void store.loadVideo()}>Open video</button>
-        <button className="export-button" disabled={exporting} onClick={onExport}>{exporting ? 'Exporting…' : 'Export video'}</button>
+      <ProjectActions store={store} exporting={exporting} onExport={onExport} />
+      <div className="source-name" title={primarySource(session).metadata.name}>
+        {primarySource(session).metadata.name}
       </div>
-      <div className="source-name" title={store.session?.source.name}>{store.session?.source.name}</div>
       {selected
         ? (
             <Inspector
               overlay={selected}
               maxDuration={duration}
-              framesPerSecond={store.session?.source.fps ?? 30}
+              framesPerSecond={session.canvas.fps}
               onBack={() => store.selectOverlay(null)}
               onChange={(patch) => store.updateOverlay(selected.id, patch)}
               onRemove={store.removeSelectedOverlay}
@@ -143,7 +159,7 @@ export function EditorWorkspace({
 }): React.JSX.Element {
   return (
     <main className="workspace" inert={exporting}>
-      <SidePanel store={store} selected={selected} duration={duration} exporting={exporting} onExport={onExport} />
+      <SidePanel store={store} session={session} selected={selected} duration={duration} exporting={exporting} onExport={onExport} />
       <div className="editor-column">
         <Preview
           session={session}

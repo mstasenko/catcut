@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { click, dismissHardwareWarningIfNeeded, e2eEnvironment, ffmpeg, main, wheel } from './support'
+import { click, dismissHardwareWarningIfNeeded, e2eEnvironment, ffmpeg, ffprobe, hover, main, wheel } from './support'
 const applications: ElectronApplication[] = []
 const temporaryDirectories: string[] = []
 
@@ -44,6 +44,13 @@ function makeVideo(directory: string): string {
     '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', input
   ])
   return input
+}
+
+function probe(path: string): { format: { duration: string }; streams: { codec_type: string; width?: number; height?: number }[] } {
+  const result: unknown = JSON.parse(execFileSync(ffprobe, [
+    '-v', 'error', '-show_format', '-show_streams', '-of', 'json', path
+  ], { encoding: 'utf8' }))
+  return result as { format: { duration: string }; streams: { codec_type: string; width?: number; height?: number }[] }
 }
 
 async function seek(window: import('@playwright/test').Page, fraction: number): Promise<void> {
@@ -103,6 +110,26 @@ test('keeps timeline and zoom controls on the transport row', async () => {
   await expect.poll(() => timeline.evaluate((element) => (element as HTMLElement).style.width)).toBe('150%')
   await click(window.getByRole('button', { name: 'Zoom out' }))
   await expect.poll(() => timeline.evaluate((element) => (element as HTMLElement).style.width)).toBe('125%')
+})
+
+test('shows the source frame under the timeline pointer', async () => {
+  const directory = temporaryDirectory('catcut-hover-preview-')
+  const input = makeVideo(directory)
+  const app = await launch(input)
+  const window = await app.firstWindow()
+  const timeline = window.locator('.timeline')
+  const box = await timeline.boundingBox()
+  if (!box) throw new Error('Timeline is not visible')
+
+  await hover(timeline, { position: { x: box.width / 2, y: 20 } })
+  const preview = window.locator('.timeline-hover-preview')
+  await expect(preview).toBeVisible()
+  await expect(preview).toContainText('00:03.00')
+  await expect.poll(() => preview.locator('video').evaluate((video) => (video as HTMLVideoElement).currentTime))
+    .toBeGreaterThan(2.5)
+
+  await hover(window.locator('.transport'))
+  await expect(preview).toBeHidden()
 })
 
 test('highlights and cuts the chosen side of one cut point without a popup', async () => {
@@ -197,12 +224,12 @@ test('renders added text into the exported video', async () => {
       if (document.body.innerText.includes('NaN')) root.dataset.sawNan = 'true'
     }).observe(document.body, { childList: true, characterData: true, subtree: true })
   })
-  await click(window.getByRole('button', { name: 'Export video' }))
+  await click(window.getByRole('button', { name: 'Export', exact: true }))
   const exportDialog = window.getByRole('dialog', { name: 'Exporting video' })
   await expect(exportDialog).toBeVisible()
   await expect(exportDialog.getByRole('progressbar')).toBeVisible()
   await expect(exportDialog.getByRole('button', { name: 'Cancel' })).toBeVisible()
-  await expect(window.getByRole('button', { name: 'Export video' })).toBeEnabled({ timeout: 30_000 })
+  await expect(window.getByRole('button', { name: 'Export', exact: true })).toBeEnabled({ timeout: 30_000 })
   await expect(exportDialog).toBeHidden()
   expect(await window.evaluate(() => document.documentElement.dataset.sawNan)).toBe('false')
   const frame = execFileSync(ffmpeg, [
@@ -221,9 +248,9 @@ test('renders SVG library images into the exported video', async () => {
   await expect(window.getByText('black.mp4', { exact: true })).toBeVisible()
   await click(window.getByRole('button', { name: 'Images', exact: true }))
   await click(window.getByRole('button', { name: 'Awesome Face', exact: true }))
-  await click(window.getByRole('button', { name: 'Export video' }))
+  await click(window.getByRole('button', { name: 'Export', exact: true }))
   await expect(window.getByRole('dialog', { name: 'Exporting video' })).toBeVisible()
-  await expect(window.getByRole('button', { name: 'Export video' })).toBeEnabled({ timeout: 30_000 })
+  await expect(window.getByRole('button', { name: 'Export', exact: true })).toBeEnabled({ timeout: 30_000 })
   await expect.poll(() => existsSync(output), { timeout: 30_000 }).toBe(true)
   const frame = execFileSync(ffmpeg, [
     '-hide_banner', '-loglevel', 'error', '-ss', '1', '-i', output,
@@ -247,9 +274,9 @@ test('exports WebM video audio together with an OGG effect', async () => {
   await click(window.getByRole('button', { name: '← Back' }))
   await click(window.getByRole('button', { name: 'Audio', exact: true }))
   await click(window.getByRole('button', { name: 'Wilhelm Scream', exact: true }))
-  await click(window.getByRole('button', { name: 'Export video' }))
+  await click(window.getByRole('button', { name: 'Export', exact: true }))
   await expect(window.getByRole('dialog', { name: 'Exporting video' })).toBeVisible()
-  await expect(window.getByRole('button', { name: 'Export video' })).toBeEnabled({ timeout: 30_000 })
+  await expect(window.getByRole('button', { name: 'Export', exact: true })).toBeEnabled({ timeout: 30_000 })
   await expect.poll(() => existsSync(output), { timeout: 30_000 }).toBe(true)
   expect(() => execFileSync(ffmpeg, [
     '-hide_banner', '-loglevel', 'error', '-i', output,
@@ -274,9 +301,9 @@ test('prepares, previews, and exports an external GIF', async () => {
   await expect.poll(() => gifPreview.evaluate((video) => (video as HTMLVideoElement).readyState), {
     timeout: 15_000
   }).toBeGreaterThan(0)
-  await click(window.getByRole('button', { name: 'Export video' }))
+  await click(window.getByRole('button', { name: 'Export', exact: true }))
   await expect(window.getByRole('dialog', { name: 'Exporting video' })).toBeVisible()
-  await expect(window.getByRole('button', { name: 'Export video' })).toBeEnabled({ timeout: 30_000 })
+  await expect(window.getByRole('button', { name: 'Export', exact: true })).toBeEnabled({ timeout: 30_000 })
   await expect.poll(() => existsSync(output), { timeout: 30_000 }).toBe(true)
 })
 
@@ -293,7 +320,7 @@ test('blocks editing and removes partial output when export is cancelled', async
   const window = await app.firstWindow()
   await expect(window.getByText('long.mp4', { exact: true })).toBeVisible()
   await click(window.getByRole('button', { name: 'Text', exact: true }))
-  await click(window.getByRole('button', { name: 'Export video' }))
+  await click(window.getByRole('button', { name: 'Export', exact: true }))
   const dialog = window.getByRole('dialog', { name: 'Exporting video' })
   await expect(dialog).toBeVisible()
   const cancel = dialog.getByRole('button', { name: 'Cancel' })
@@ -302,4 +329,110 @@ test('blocks editing and removes partial output when export is cancelled', async
   await expect(dialog).toBeHidden({ timeout: 10_000 })
   expect(existsSync(output)).toBe(false)
   await expect(window.getByText('CatCut could not export this video. Check the destination and try again.')).toHaveCount(0)
+})
+
+test('ripple-inserts and exports a second main-timeline video', async () => {
+  const directory = temporaryDirectory('catcut-insert-')
+  const first = join(directory, 'first.mp4')
+  const second = join(directory, 'second.mp4')
+  const output = join(directory, 'combined.mp4')
+  execFileSync(ffmpeg, [
+    '-hide_banner', '-loglevel', 'error', '-y',
+    '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=24:duration=2',
+    '-f', 'lavfi', '-i', 'sine=frequency=440:duration=2',
+    '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', first
+  ])
+  execFileSync(ffmpeg, [
+    '-hide_banner', '-loglevel', 'error', '-y',
+    '-f', 'lavfi', '-i', 'color=red:size=180x320:rate=30:duration=1',
+    '-c:v', 'libx264', '-pix_fmt', 'yuv420p', second
+  ])
+  const app = await launch(first, output, { CATCUT_E2E_VIDEO: second })
+  const window = await app.firstWindow()
+  await click(window.locator('.timeline'), { position: { x: 300, y: 20 } })
+  await click(window.getByRole('button', { name: 'Insert video', exact: true }))
+  await expect(window.locator('.source-segment')).toHaveCount(3)
+  await expect(window.locator('.source-segment').nth(1)).toHaveAttribute('title', 'second.mp4')
+  await click(window.getByRole('button', { name: 'Export', exact: true }))
+  await expect(window.getByRole('button', { name: 'Export', exact: true })).toBeEnabled({ timeout: 30_000 })
+  await expect.poll(() => existsSync(output), { timeout: 30_000 }).toBe(true)
+  const result = probe(output)
+  expect(Number(result.format.duration)).toBeCloseTo(3, 1)
+  expect(result.streams.find((stream) => stream.codec_type === 'video')).toMatchObject({ width: 320, height: 180 })
+  expect(result.streams.some((stream) => stream.codec_type === 'audio')).toBe(true)
+})
+
+test('opens and exports a centered vertical Short project', async () => {
+  const directory = temporaryDirectory('catcut-short-')
+  const input = makeVideo(directory)
+  const output = join(directory, 'short.mp4')
+  const app = await launch(input, output, { CATCUT_E2E_VIDEO: input })
+  const window = await app.firstWindow()
+  await click(window.getByRole('button', { name: 'Open Short', exact: true }))
+  await expect(window.locator('.preview-stage')).toHaveCSS('aspect-ratio', '1080 / 1920')
+  await click(window.getByRole('button', { name: 'Export', exact: true }))
+  await expect(window.getByRole('button', { name: 'Export', exact: true })).toBeEnabled({ timeout: 30_000 })
+  await expect.poll(() => existsSync(output), { timeout: 30_000 }).toBe(true)
+  expect(probe(output).streams.find((stream) => stream.codec_type === 'video')).toMatchObject({ width: 1080, height: 1920 })
+})
+
+test('shows the cropped Short frame and active meme overlay in the timeline preview', async () => {
+  const directory = temporaryDirectory('catcut-short-hover-')
+  const input = makeVideo(directory)
+  const app = await launch(input, undefined, { CATCUT_E2E_VIDEO: input })
+  const window = await app.firstWindow()
+  await click(window.getByRole('button', { name: 'Open Short', exact: true }))
+  await click(window.getByRole('button', { name: 'Images', exact: true }))
+  const asset = window.locator('.visual-asset').first()
+  await expect(asset).toBeVisible()
+  await click(asset)
+
+  const timeline = window.locator('.timeline')
+  const box = await timeline.boundingBox()
+  if (!box) throw new Error('Timeline is not visible')
+  await hover(timeline, { position: { x: box.width * 0.1, y: 20 } })
+  const preview = window.locator('.timeline-hover-preview')
+  await expect(preview).toBeVisible()
+  await expect(preview.locator('.timeline-hover-overlay')).toHaveCount(1)
+  await expect(preview.locator('.timeline-hover-frame > video')).toHaveCSS('object-fit', 'cover')
+  const frame = await preview.locator('.timeline-hover-frame').boundingBox()
+  expect(frame).not.toBeNull()
+  expect((frame?.width ?? 0) / (frame?.height ?? 1)).toBeCloseTo(9 / 16, 2)
+})
+
+test('restores normal-close state and Reset project forgets it', async () => {
+  const directory = temporaryDirectory('catcut-restore-')
+  const input = makeVideo(directory)
+  const first = await launch(input)
+  const firstWindow = await first.firstWindow()
+  await click(firstWindow.getByRole('button', { name: 'Text', exact: true }))
+  await firstWindow.getByRole('textbox', { name: 'Text' }).fill('RESTORED')
+  await first.close()
+
+  const restored = await electron.launch({ args: [main], env: e2eEnvironment() })
+  applications.push(restored)
+  const restoredWindow = await restored.firstWindow()
+  await dismissHardwareWarningIfNeeded(restoredWindow)
+  await expect(restoredWindow.getByRole('textbox', { name: 'Text' })).toHaveValue('RESTORED')
+  expect(await restored.evaluate(({ Menu }) => {
+    const project = Menu.getApplicationMenu()?.items.find((item) => item.label === 'Project')
+    return project?.submenu?.items.filter((item) => item.type !== 'separator').map((item) => item.label)
+  })).toEqual(['CatCut 0.2.0', 'Reset project'])
+  await restoredWindow.evaluate(() => { window.confirm = () => true })
+  await restored.evaluate(({ Menu }) => {
+    const reset = Menu.getApplicationMenu()?.items
+      .find((item) => item.label === 'Project')?.submenu?.items
+      .find((item) => item.label === 'Reset project')
+    if (!reset) throw new Error('Reset project menu item is missing')
+    const activate = reset.click as () => void
+    activate()
+  })
+  await expect(restoredWindow.getByRole('heading', { name: 'Drop a video' })).toBeVisible()
+  await restored.close()
+
+  const empty = await electron.launch({ args: [main], env: e2eEnvironment() })
+  applications.push(empty)
+  const emptyWindow = await empty.firstWindow()
+  await dismissHardwareWarningIfNeeded(emptyWindow)
+  await expect(emptyWindow.getByRole('heading', { name: 'Drop a video' })).toBeVisible()
 })

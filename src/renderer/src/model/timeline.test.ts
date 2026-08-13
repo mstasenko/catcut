@@ -7,6 +7,7 @@ import {
   deletionRange,
   defaultTextOverlay,
   formatTime,
+  insertSourceAtOutputTime,
   isSourceTimedOverlay,
   overlaySourceTime,
   outputTimeForSource,
@@ -26,16 +27,62 @@ const source: MediaMetadata = {
 describe('timeline model', () => {
   it('creates a path-backed initial session', () => {
     const session = createSession(source)
-    expect(session.source).toBe(source)
+    expect(session.sources[0]?.metadata).toBe(source)
     expect(session.segments).toHaveLength(1)
     expect(timelineDuration(session.segments)).toBe(20)
     expect(session.dirty).toBe(false)
   })
 
+  it('creates a centered 9:16 Short project', () => {
+    expect(createSession(source, true).canvas).toEqual({ width: 1080, height: 1920, fps: 30, fit: 'cover' })
+  })
+
+  it('ripple-inserts a source by splitting the active segment and overlays', () => {
+    const session = createSession(source)
+    const originalSourceId = session.sources[0]?.id
+    session.cutPoints = [2, 8]
+    session.overlays = [
+      { ...defaultTextOverlay(3, 1), id: 'text', duration: 4 },
+      {
+        id: 'audio', type: 'audio', name: 'Audio', path: '/audio.wav', start: 3,
+        duration: 4, zIndex: 2, volume: 1, sourceIn: 2, sourceDuration: 10
+      }
+    ]
+    const insertedMetadata = { ...source, path: '/inserted.mp4', name: 'inserted.mp4', duration: 4 }
+    const result = insertSourceAtOutputTime(session, {
+      id: 'inserted', metadata: insertedMetadata, playbackPath: 'catcut:/inserted.mp4', waveform: []
+    }, 5)
+
+    expect(result.segments.map(({ sourceId, sourceStart, sourceEnd }) => ({ sourceId, sourceStart, sourceEnd }))).toEqual([
+      { sourceId: originalSourceId, sourceStart: 0, sourceEnd: 5 },
+      { sourceId: 'inserted', sourceStart: 0, sourceEnd: 4 },
+      { sourceId: originalSourceId, sourceStart: 5, sourceEnd: 20 }
+    ])
+    expect(result.cutPoints).toEqual([2, 12])
+    expect(result.overlays.map(({ type, start, duration }) => ({ type, start, duration }))).toEqual([
+      { type: 'text', start: 3, duration: 2 },
+      { type: 'text', start: 9, duration: 2 },
+      { type: 'audio', start: 3, duration: 2 },
+      { type: 'audio', start: 9, duration: 2 }
+    ])
+    expect(result.overlays[3]).toMatchObject({ sourceIn: 4 })
+    expect(result.playhead).toBe(5)
+  })
+
+  it('inserts at either timeline boundary without empty segments', () => {
+    const inserted = {
+      id: 'inserted', metadata: { ...source, duration: 2 }, playbackPath: '/inserted', waveform: []
+    }
+    const atStart = insertSourceAtOutputTime(createSession(source), inserted, -1)
+    expect(atStart.segments.map((segment) => segment.sourceId)).toEqual(['inserted', atStart.sources[0]?.id])
+    const atEnd = insertSourceAtOutputTime(createSession(source), inserted, 999)
+    expect(atEnd.segments.map((segment) => segment.sourceId)).toEqual([atEnd.sources[0]?.id, 'inserted'])
+  })
+
   it('maps output positions across retained source segments', () => {
     const segments: SourceSegment[] = [
-      { id: 'a', sourceStart: 2, sourceEnd: 5 },
-      { id: 'b', sourceStart: 10, sourceEnd: 14 }
+      { id: 'a', sourceId: 'source', sourceStart: 2, sourceEnd: 5 },
+      { id: 'b', sourceId: 'source', sourceStart: 10, sourceEnd: 14 }
     ]
     expect(timelineDuration(segments)).toBe(7)
     expect(positionAtOutputTime(segments, 1)?.sourceTime).toBe(3)
@@ -69,8 +116,8 @@ describe('timeline model', () => {
 
   it('removes a range spanning segments and collapses output time', () => {
     const segments: SourceSegment[] = [
-      { id: 'a', sourceStart: 0, sourceEnd: 5 },
-      { id: 'b', sourceStart: 10, sourceEnd: 15 }
+      { id: 'a', sourceId: 'source', sourceStart: 0, sourceEnd: 5 },
+      { id: 'b', sourceId: 'source', sourceStart: 10, sourceEnd: 15 }
     ]
     const result = removeOutputRange(segments, [], 3, 7)
     expect(result.segments.map(({ sourceStart, sourceEnd }) => [sourceStart, sourceEnd])).toEqual([[0, 3], [12, 15]])
@@ -89,7 +136,7 @@ describe('timeline model', () => {
       base('right', 5, 3),
       base('after', 8, 1)
     ]
-    const result = removeOutputRange([{ id: 's', sourceStart: 0, sourceEnd: 10 }], overlays, 2, 6)
+    const result = removeOutputRange([{ id: 's', sourceId: 'source', sourceStart: 0, sourceEnd: 10 }], overlays, 2, 6)
     expect(result.overlays.map(({ id, start, duration }) => ({ id, start, duration }))).toEqual([
       { id: 'before', start: 0, duration: 1 },
       { id: 'left', start: 1, duration: 1 },
@@ -105,7 +152,7 @@ describe('timeline model', () => {
       start: 1, duration: 7, zIndex: 1, volume: 1, sourceIn: 10, sourceDuration: 30
     }
     const result = removeOutputRange(
-      [{ id: 'source', sourceStart: 0, sourceEnd: 10 }],
+      [{ id: 'source', sourceId: 'source', sourceStart: 0, sourceEnd: 10 }],
       [audio],
       2,
       6
@@ -122,7 +169,7 @@ describe('timeline model', () => {
       zIndex: 1, volume: 1, sourceIn: 4, sourceDuration: 20
     })
     const result = removeOutputRange(
-      [{ id: 'source', sourceStart: 0, sourceEnd: 10 }],
+      [{ id: 'source', sourceId: 'source', sourceStart: 0, sourceEnd: 10 }],
       [audio('left', 1, 3), audio('right', 3, 5), audio('removed', 3, 1)],
       2,
       6
@@ -143,7 +190,7 @@ describe('timeline model', () => {
       { ...visual, id: 'gif', type: 'gif' }
     ]
     const result = removeOutputRange(
-      [{ id: 'source', sourceStart: 0, sourceEnd: 10 }],
+      [{ id: 'source', sourceId: 'source', sourceStart: 0, sourceEnd: 10 }],
       overlays,
       2,
       6
@@ -154,7 +201,7 @@ describe('timeline model', () => {
   })
 
   it('handles reversed, empty, and bounded removals', () => {
-    const segments = [{ id: 'a', sourceStart: 0, sourceEnd: 10 }]
+    const segments = [{ id: 'a', sourceId: 'source', sourceStart: 0, sourceEnd: 10 }]
     expect(removeOutputRange(segments, [], 5, 5).segments).toBe(segments)
     expect(timelineDuration(removeOutputRange(segments, [], 9, 2).segments)).toBe(3)
     expect(removeOutputRange(segments, [], -10, 20).segments).toEqual([])

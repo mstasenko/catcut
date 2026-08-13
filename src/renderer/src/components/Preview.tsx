@@ -6,6 +6,7 @@ import {
   outputTimeForSource,
   overlayAtTime,
   positionAtOutputTime,
+  sourceForSegment,
   timelineDuration
 } from '../model/timeline'
 
@@ -49,7 +50,7 @@ function TransportControls({ props, total }: { props: PreviewProps; total: numbe
       <button disabled={!props.canUndo} onClick={props.onUndo} aria-label="Undo" title="Undo (Ctrl+Z)">↶</button>
       <button disabled={!props.canRedo} onClick={props.onRedo} aria-label="Redo" title="Redo (Ctrl+Shift+Z)">↷</button>
       <span className="timeline-title">Timeline</span>
-      <span className="timeline-time">{formatTime(props.session.playhead, props.session.source.fps)} / {formatTime(total, props.session.source.fps)}</span>
+      <span className="timeline-time">{formatTime(props.session.playhead, props.session.canvas.fps)} / {formatTime(total, props.session.canvas.fps)}</span>
       <button disabled={props.zoom <= 1} onClick={() => props.onZoom(Math.max(1, props.zoom - 0.25))} aria-label="Zoom out">−</button>
       <button disabled={props.zoom >= 8} onClick={() => props.onZoom(Math.min(8, props.zoom + 0.25))} aria-label="Zoom in">+</button>
     </div>
@@ -197,7 +198,7 @@ function updatePlayback(
   const next = session.segments[nextIndex]
   if (next) {
     activeSegment.current = nextIndex
-    video.currentTime = next.sourceStart
+    onPlayhead(outputTimeForSource(session.segments, nextIndex, next.sourceStart))
     return
   }
   onPlayhead(total)
@@ -289,11 +290,14 @@ export function Preview(props: PreviewProps): React.JSX.Element {
   const activeSegment = useRef(0)
   const seekingFromTimeline = useRef(false)
   const total = timelineDuration(props.session.segments)
+  const position = positionAtOutputTime(props.session.segments, props.session.playhead)
+  const activeSource = position ? sourceForSegment(props.session, position.segment) : null
+  const playbackPath = activeSource?.playbackPath ?? ''
   const playing = props.playing
   const onPlayingChange = props.onPlayingChange
 
 
-  useEffect(() => setMediaError(null), [props.session.playbackPath])
+  useEffect(() => setMediaError(null), [playbackPath])
 
   useEffect(() => {
     const video = videoRef.current
@@ -304,7 +308,7 @@ export function Preview(props: PreviewProps): React.JSX.Element {
       seekingFromTimeline.current = true
       video.currentTime = position.sourceTime
     }
-  }, [props.session.playhead, props.session.segments])
+  }, [playbackPath, props.session.playhead, props.session.segments])
 
   useEffect(() => {
     const video = videoRef.current
@@ -320,19 +324,20 @@ export function Preview(props: PreviewProps): React.JSX.Element {
       video.pause()
     }
     return () => { cancelled = true }
-  }, [playing, onPlayingChange])
+  }, [playing, playbackPath, onPlayingChange])
 
   return (
     <section className="preview-shell" aria-label="Video preview">
       <div
         ref={stageRef}
         className="preview-stage"
-        style={{ aspectRatio: `${props.session.source.width} / ${props.session.source.height}` }}
+        style={{ aspectRatio: `${props.session.canvas.width} / ${props.session.canvas.height}` }}
         onPointerDown={(event) => { if (event.target === event.currentTarget) props.onSelect(null) }}
       >
         <video
           ref={videoRef}
-          src={props.session.playbackPath}
+          src={playbackPath}
+          style={{ objectFit: props.session.canvas.fit }}
           preload="auto"
           playsInline
           onLoadedData={() => setMediaError(null)}

@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { EditSession, ImageOverlay, Overlay, TextOverlay } from '@shared/types'
 import { EditorWorkspace, ExportProgress, GpuWarning, StatusBanners, Welcome } from './components/AppLayout'
-import { selectedOverlay, useEditorStore } from './model/store'
-import { timelineDuration } from './model/timeline'
+import { savedSession, selectedOverlay, useEditorStore } from './model/store'
+import { primarySource, timelineDuration } from './model/timeline'
 
 function exportName(name: string): string {
   const dot = name.lastIndexOf('.')
@@ -96,7 +96,7 @@ async function prepareOverlay(overlay: Overlay, session: EditSession): Promise<O
   if (overlay.type === 'text') {
     return {
       ...overlay,
-      renderedImageDataUrl: await renderText(overlay, session.source.width, session.source.height)
+      renderedImageDataUrl: await renderText(overlay, session.canvas.width, session.canvas.height)
     }
   }
   return isSvgImage(overlay)
@@ -116,7 +116,8 @@ function exportWasCancelled(error: unknown): boolean {
 async function exportSession(session: EditSession, outputPath: string): Promise<void> {
   const overlays = await Promise.all(session.overlays.map((overlay) => prepareOverlay(overlay, session)))
   await window.catcut.exportVideo({
-    source: session.source,
+    canvas: session.canvas,
+    sources: session.sources.map(({ id, metadata }) => ({ id, metadata })),
     outputPath,
     segments: session.segments,
     overlays
@@ -142,9 +143,18 @@ export default function App(): React.JSX.Element {
     void store.initialize()
     const removeJobListener = window.catcut.onJobProgress(store.setJob)
     const removeOpenListener = window.catcut.onOpenPath((path) => void store.loadVideo(path))
+    const removeResetListener = window.catcut.onResetProject(() => {
+      if (window.confirm('Reset the current project and forget its saved state?')) void store.resetProject()
+    })
+    const removeSaveListener = window.catcut.onSaveRequest(async () => {
+      const current = useEditorStore.getState().session
+      if (current) await window.catcut.saveSession(savedSession(current))
+    })
     return () => {
       removeJobListener()
       removeOpenListener()
+      removeResetListener()
+      removeSaveListener()
     }
     // Initialize the bridge subscription once; Zustand action identities are stable.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -183,7 +193,7 @@ export default function App(): React.JSX.Element {
 
   const runExport = async (): Promise<void> => {
     if (!session || exporting) return
-    const outputPath = await window.catcut.chooseExportPath(exportName(session.source.name))
+    const outputPath = await window.catcut.chooseExportPath(exportName(primarySource(session).metadata.name))
     if (!outputPath) return
     setPlaying(false)
     setExporting(true)

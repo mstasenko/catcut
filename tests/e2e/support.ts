@@ -3,6 +3,7 @@ import { join, resolve } from 'node:path'
 
 export const projectRoot = resolve(import.meta.dirname, '../..')
 export const ffmpeg = join(projectRoot, 'node_modules', 'ffmpeg-static', 'ffmpeg')
+export const ffprobe = join(projectRoot, 'node_modules', 'ffprobe-static', 'bin', 'linux', 'x64', 'ffprobe')
 export const main = join(projectRoot, 'out', 'main', 'index.js')
 
 type ClickOptions = NonNullable<Parameters<Locator['click']>[0]>
