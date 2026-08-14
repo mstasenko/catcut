@@ -51,7 +51,10 @@ describe('timeline model', () => {
     const insertedMetadata = { ...source, path: '/inserted.mp4', name: 'inserted.mp4', duration: 4 }
     const result = insertSourceAtOutputTime(session, {
       id: 'inserted', metadata: insertedMetadata, playbackPath: 'catcut:/inserted.mp4', waveform: []
-    }, 5)
+    }, 5, {
+      into: { effect: 'wipeleft', duration: 0.5 },
+      back: { effect: 'circleopen', duration: 0.75 }
+    })
 
     expect(result.segments.map(({ sourceId, sourceStart, sourceEnd }) => ({ sourceId, sourceStart, sourceEnd }))).toEqual([
       { sourceId: originalSourceId, sourceStart: 0, sourceEnd: 5 },
@@ -66,17 +69,34 @@ describe('timeline model', () => {
       { type: 'audio', start: 9, duration: 2 }
     ])
     expect(result.overlays[3]).toMatchObject({ sourceIn: 4 })
+    expect(result.segments[1]?.transition).toEqual({ effect: 'wipeleft', duration: 0.5 })
+    expect(result.segments[2]?.transition).toEqual({ effect: 'circleopen', duration: 0.75 })
     expect(result.playhead).toBe(5)
   })
 
-  it('inserts at either timeline boundary without empty segments', () => {
+  it('fits transitions at either timeline boundary without empty segments', () => {
     const inserted = {
       id: 'inserted', metadata: { ...source, duration: 2 }, playbackPath: '/inserted', waveform: []
     }
-    const atStart = insertSourceAtOutputTime(createSession(source), inserted, -1)
+    const transitions = {
+      into: { effect: 'fade' as const, duration: 4 },
+      back: { effect: 'hblur' as const, duration: 1 }
+    }
+    const atStart = insertSourceAtOutputTime(createSession(source), inserted, -1, transitions)
     expect(atStart.segments.map((segment) => segment.sourceId)).toEqual(['inserted', atStart.sources[0]?.id])
-    const atEnd = insertSourceAtOutputTime(createSession(source), inserted, 999)
+    expect(atStart.segments[0]?.transition).toBeUndefined()
+    expect(atStart.segments[1]?.transition).toEqual({ effect: 'hblur', duration: 1 })
+    const atEnd = insertSourceAtOutputTime(createSession(source), inserted, 999, transitions)
     expect(atEnd.segments.map((segment) => segment.sourceId)).toEqual([atEnd.sources[0]?.id, 'inserted'])
+    expect(atEnd.segments[1]?.transition).toEqual({ effect: 'fade', duration: 2 })
+
+    const tiny = {
+      ...inserted,
+      id: 'tiny',
+      metadata: { ...inserted.metadata, duration: 0.02 }
+    }
+    const withTinyClip = insertSourceAtOutputTime(createSession(source), tiny, 10, transitions)
+    expect(withTinyClip.segments[1]?.transition).toBeUndefined()
   })
 
   it('maps output positions across retained source segments', () => {
@@ -116,12 +136,25 @@ describe('timeline model', () => {
 
   it('removes a range spanning segments and collapses output time', () => {
     const segments: SourceSegment[] = [
-      { id: 'a', sourceId: 'source', sourceStart: 0, sourceEnd: 5 },
-      { id: 'b', sourceId: 'source', sourceStart: 10, sourceEnd: 15 }
+      { id: 'a', sourceId: 'source', sourceStart: 0, sourceEnd: 5, transition: { effect: 'fade', duration: 1 } },
+      { id: 'b', sourceId: 'source', sourceStart: 10, sourceEnd: 15, transition: { effect: 'wipeleft', duration: 1 } }
     ]
     const result = removeOutputRange(segments, [], 3, 7)
     expect(result.segments.map(({ sourceStart, sourceEnd }) => [sourceStart, sourceEnd])).toEqual([[0, 3], [12, 15]])
+    expect(result.segments.every((segment) => segment.transition === undefined)).toBe(true)
     expect(timelineDuration(result.segments)).toBe(6)
+  })
+
+  it('keeps transitions between untouched clips after a ripple removal', () => {
+    const segments: SourceSegment[] = [
+      { id: 'a', sourceId: 'source', sourceStart: 0, sourceEnd: 2 },
+      { id: 'b', sourceId: 'source', sourceStart: 2, sourceEnd: 4, transition: { effect: 'fade', duration: 0.5 } },
+      { id: 'c', sourceId: 'source', sourceStart: 4, sourceEnd: 6, transition: { effect: 'hblur', duration: 0.5 } }
+    ]
+    const result = removeOutputRange(segments, [], 0, 1)
+    expect(result.segments[0]?.transition).toBeUndefined()
+    expect(result.segments[1]?.transition).toEqual({ effect: 'fade', duration: 0.5 })
+    expect(result.segments[2]?.transition).toEqual({ effect: 'hblur', duration: 0.5 })
   })
 
   it('trims, removes, and shifts overlays with deleted video', () => {

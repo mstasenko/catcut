@@ -1,10 +1,12 @@
 import type {
   EditSession,
+  InsertTransitions,
   MediaMetadata,
   Overlay,
   SourceSegment,
   TimelineSource,
-  TextOverlay
+  TextOverlay,
+  VideoTransition
 } from '@shared/types'
 
 const EPSILON = 0.0001
@@ -177,27 +179,46 @@ export function removeOutputRange(
 
     if (keepBefore > EPSILON) {
       output.push({
+        ...segment,
         id: makeId('segment'),
-        sourceId: segment.sourceId,
-        sourceStart: segment.sourceStart,
         sourceEnd: segment.sourceStart + keepBefore
       })
     }
     if (keepAfter > EPSILON) {
-      output.push({
+      output.push(withTransition({
+        ...segment,
         id: makeId('segment'),
-        sourceId: segment.sourceId,
         sourceStart: segment.sourceEnd - keepAfter,
         sourceEnd: segment.sourceEnd
-      })
+      }, keepAfter >= segmentDuration - EPSILON ? segment.transition : undefined))
     }
     outputCursor = segmentOutputEnd
   }
 
   return {
-    segments: output,
+    // A transition cannot lead into the first remaining clip because there is no
+    // outgoing frame. Removing it also keeps restored projects deterministic.
+    segments: output.map((segment, index) => index === 0 ? withTransition(segment) : segment),
     overlays: trimOverlaysForRemoval(overlays, start, end)
   }
+}
+
+function fittedTransition(
+  transition: VideoTransition | undefined,
+  segmentDuration: number
+): VideoTransition | undefined {
+  if (!transition || transition.duration < 0.05 || segmentDuration < 0.05) return undefined
+  return { ...transition, duration: Math.min(transition.duration, segmentDuration, 5) }
+}
+
+function withTransition(
+  segment: SourceSegment,
+  transition?: VideoTransition
+): SourceSegment {
+  const plainSegment = { ...segment }
+  delete plainSegment.transition
+  const fitted = fittedTransition(transition, segment.sourceEnd - segment.sourceStart)
+  return fitted ? { ...plainSegment, transition: fitted } : plainSegment
 }
 
 function overlaysAfterInsertion(overlays: Overlay[], point: number, duration: number): Overlay[] {
@@ -222,7 +243,8 @@ function overlaysAfterInsertion(overlays: Overlay[], point: number, duration: nu
 export function insertSourceAtOutputTime(
   session: EditSession,
   source: TimelineSource,
-  rawPoint: number
+  rawPoint: number,
+  transitions: InsertTransitions = {}
 ): EditSession {
   const total = timelineDuration(session.segments)
   const point = clamp(rawPoint, 0, total)
@@ -240,13 +262,21 @@ export function insertSourceAtOutputTime(
     const segmentDuration = segment.sourceEnd - segment.sourceStart
     const offset = point - cursor
     if (!didInsert && offset <= EPSILON) {
-      segments.push(inserted)
+      segments.push(
+        withTransition(inserted, segments.length > 0 ? transitions.into : undefined),
+        withTransition(segment, transitions.back)
+      )
       didInsert = true
+      cursor += segmentDuration
+      continue
     } else if (!didInsert && offset < segmentDuration - EPSILON) {
       segments.push(
         { ...segment, id: makeId('segment'), sourceEnd: segment.sourceStart + offset },
-        inserted,
-        { ...segment, id: makeId('segment'), sourceStart: segment.sourceStart + offset }
+        withTransition(inserted, transitions.into),
+        withTransition(
+          { ...segment, id: makeId('segment'), sourceStart: segment.sourceStart + offset },
+          transitions.back
+        )
       )
       didInsert = true
       cursor += segmentDuration
@@ -255,7 +285,7 @@ export function insertSourceAtOutputTime(
     segments.push(segment)
     cursor += segmentDuration
   }
-  if (!didInsert) segments.push(inserted)
+  if (!didInsert) segments.push(withTransition(inserted, segments.length > 0 ? transitions.into : undefined))
 
   return {
     ...session,

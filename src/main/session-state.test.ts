@@ -20,8 +20,19 @@ const metadata = {
 const session = {
   canvas: { width: 320, height: 180, fps: 24, fit: 'contain' },
   sources: [{ id: 'source', metadata }],
-  segments: [{ id: 'segment', sourceId: 'source', sourceStart: 0, sourceEnd: 3 }],
+  segments: [
+    { id: 'first', sourceId: 'source', sourceStart: 0, sourceEnd: 1 },
+    {
+      id: 'segment', sourceId: 'source', sourceStart: 1, sourceEnd: 3,
+      transition: { effect: 'wipeleft', duration: 0.5 }
+    }
+  ],
   overlays: [], selectedOverlayId: null, playhead: 1, cutPoints: [1], dirty: true
+}
+const persistedSession = {
+  ...session,
+  history: [{ ...session, playhead: 0, cutPoints: [], dirty: false }],
+  future: [{ ...session, playhead: 2, cutPoints: [1, 2] }]
 }
 
 afterEach(async () => Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true }))))
@@ -29,8 +40,8 @@ afterEach(async () => Promise.all(directories.splice(0).map((path) => rm(path, {
 describe('saved editor state', () => {
   it('atomically saves, loads, and resets a valid session', async () => {
     const path = await statePath()
-    await saveSessionFile(path, session)
-    expect(await loadSessionFile(path)).toEqual(session)
+    await saveSessionFile(path, persistedSession)
+    expect(await loadSessionFile(path)).toEqual(persistedSession)
     await resetSessionFile(path)
     expect(await loadSessionFile(path)).toBeNull()
   })
@@ -38,9 +49,9 @@ describe('saved editor state', () => {
   it('ignores missing, malformed, and invalid state', async () => {
     const path = await statePath()
     expect(await loadSessionFile(path)).toBeNull()
-    await saveSessionFile(path, session)
+    await saveSessionFile(path, persistedSession)
     await writeFile(path, '{')
     expect(await loadSessionFile(path)).toBeNull()
-    await expect(saveSessionFile(path, { ...session, playhead: 99 })).rejects.toThrow('Playhead')
+    await expect(saveSessionFile(path, { ...persistedSession, playhead: 99 })).rejects.toThrow('Playhead')
   })
 })

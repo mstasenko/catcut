@@ -85,7 +85,7 @@ function addSegmentFilters(filters: string[], request: ExportRequest): {
       : `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black`
     filters.push(
       `[${inputIndex}:v:0]trim=start=${seconds(segment.sourceStart)}:end=${seconds(segment.sourceEnd)},` +
-      `setpts=PTS-STARTPTS,${scaleAndCrop},setsar=1,fps=${fps},format=yuv420p[vseg${index}]`
+      `setpts=PTS-STARTPTS,${scaleAndCrop},setsar=1,fps=${fps},settb=AVTB,format=yuv420p[vseg${index}]`
     )
     videoSegments.push(`[vseg${index}]`)
     if (source.hasAudio) {
@@ -107,13 +107,46 @@ function addBaseFilters(
   audioSegments: string[],
   request: ExportRequest
 ): void {
+  addVideoBaseFilters(filters, videoSegments, request)
   if (request.segments.length === 1) {
-    filters.push(`${videoSegments[0]}null[basev]`)
     filters.push(`${audioSegments[0]}anull[basea]`)
   } else {
-    filters.push(`${videoSegments.join('')}concat=n=${request.segments.length}:v=1:a=0[basev]`)
     filters.push(`${audioSegments.join('')}concat=n=${request.segments.length}:v=0:a=1[basea]`)
   }
+}
+
+function addVideoBaseFilters(
+  filters: string[],
+  videoSegments: string[],
+  request: ExportRequest
+): void {
+  let currentLabel = required(videoSegments[0], 'The timeline is empty')
+  const firstSegment = required(request.segments[0], 'The timeline is empty')
+  let outputDuration = firstSegment.sourceEnd - firstSegment.sourceStart
+
+  for (let index = 1; index < request.segments.length; index += 1) {
+    const segment = required(request.segments[index], 'A timeline video segment is missing')
+    const nextLabel = required(videoSegments[index], 'A timeline video segment is missing')
+    const joinedLabel = `[vjoin${index}]`
+    if (segment.transition) {
+      const heldLabel = `[vhold${index}]`
+      filters.push(
+        `${currentLabel}tpad=stop_mode=clone:stop_duration=${seconds(segment.transition.duration)}${heldLabel}`,
+        `${heldLabel}${nextLabel}xfade=transition=${segment.transition.effect}:` +
+        `duration=${seconds(segment.transition.duration)}:offset=${seconds(outputDuration)}${joinedLabel}`
+      )
+    } else {
+      filters.push(`${currentLabel}${nextLabel}concat=n=2:v=1:a=0${joinedLabel}`)
+    }
+    currentLabel = joinedLabel
+    outputDuration += segment.sourceEnd - segment.sourceStart
+  }
+  filters.push(`${currentLabel}null[basev]`)
+}
+
+function required<T>(value: T | undefined, message: string): T {
+  if (value === undefined) throw new Error(message)
+  return value
 }
 
 function visualFilter(
@@ -246,7 +279,7 @@ function frameTolerance(fps: number): number {
 }
 
 async function canStreamCopy(request: ExportRequest): Promise<boolean> {
-  if (request.overlays.length > 0) return false
+  if (requiresVideoEncoding(request)) return false
   const timelineSource = soleTimelineSource(request)
   if (!timelineSource) return false
   const source = timelineSource.metadata
@@ -254,6 +287,10 @@ async function canStreamCopy(request: ExportRequest): Promise<boolean> {
   if (!preservesSourceFormat(request, source)) return false
   const frames = await keyframes(source.path)
   return segmentsAreKeyframeSafe(request, frames, frameTolerance(source.fps), source.duration)
+}
+
+function requiresVideoEncoding(request: ExportRequest): boolean {
+  return request.overlays.length > 0 || request.segments.some((segment) => segment.transition)
 }
 
 function concatPath(path: string): string {

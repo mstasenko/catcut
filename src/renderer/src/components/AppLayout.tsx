@@ -86,7 +86,6 @@ function ProjectActions({ store, exporting, onExport }: {
     <div className="project-actions">
       <button onClick={() => void store.loadVideo()}>Open</button>
       <button onClick={() => void store.openShort()}>Open Short</button>
-      <button disabled={exporting} onClick={() => void store.insertVideo()}>Insert video</button>
       <button className="export-button" disabled={exporting} onClick={onExport}>{exporting ? 'Exporting…' : 'Export'}</button>
     </div>
   )
@@ -126,6 +125,7 @@ function SidePanel({ store, session, selected, duration, exporting, onExport }: 
               onCategory={setAssetCategory}
               onText={() => { setAssetCategory(null); store.addText() }}
               onNew={() => { setAssetCategory(null); void store.addExternalMedia() }}
+              onInsert={(transitions) => void store.insertVideo(transitions)}
               onAsset={(asset) => void store.addAsset(asset)}
               onError={store.showError}
             />

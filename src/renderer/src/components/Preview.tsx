@@ -9,6 +9,8 @@ import {
   sourceForSegment,
   timelineDuration
 } from '../model/timeline'
+import { transitionAtOutputTime, transitionPreviewAtOutputTime } from '../model/transitions'
+import { OutgoingTransitionVideo } from './TransitionPreview'
 
 interface PreviewProps {
   session: EditSession
@@ -205,6 +207,41 @@ function updatePlayback(
   onPlayingChange(false)
 }
 
+interface SmoothTransitionFrame {
+  segmentId: string
+  outputTime: number
+}
+
+function useSmoothTransitionTime(
+  videoRef: React.RefObject<HTMLVideoElement | null>,
+  session: EditSession,
+  segmentIndex: number,
+  playing: boolean,
+  mediaKey: string
+): number {
+  const [frame, setFrame] = useState<SmoothTransitionFrame | null>(null)
+  const segment = session.segments[segmentIndex]
+
+  useEffect(() => {
+    const video = videoRef.current
+    if (!video || !playing || !segment) return
+    let callbackId = 0
+    const update = (_now: number, metadata: VideoFrameCallbackMetadata): void => {
+      const outputTime = outputTimeForSource(session.segments, segmentIndex, metadata.mediaTime)
+      setFrame(transitionAtOutputTime(session.segments, outputTime)
+        ? { segmentId: segment.id, outputTime }
+        : null)
+      callbackId = video.requestVideoFrameCallback(update)
+    }
+    callbackId = video.requestVideoFrameCallback(update)
+    return () => video.cancelVideoFrameCallback(callbackId)
+  }, [mediaKey, playing, segment, segmentIndex, session.segments, videoRef])
+
+  return playing && frame && segment && frame.segmentId === segment.id
+    ? frame.outputTime
+    : session.playhead
+}
+
 function VisualItem({
   overlay, children, selected, onSelect, onChange,
   onGestureStart, onGestureEnd, onGestureCancel, bounds
@@ -295,6 +332,14 @@ export function Preview(props: PreviewProps): React.JSX.Element {
   const playbackPath = activeSource?.playbackPath ?? ''
   const playing = props.playing
   const onPlayingChange = props.onPlayingChange
+  const visualTime = useSmoothTransitionTime(
+    videoRef,
+    props.session,
+    position?.segmentIndex ?? 0,
+    playing,
+    playbackPath
+  )
+  const transitionPreview = transitionPreviewAtOutputTime(props.session, visualTime)
 
 
   useEffect(() => setMediaError(null), [playbackPath])
@@ -334,10 +379,17 @@ export function Preview(props: PreviewProps): React.JSX.Element {
         style={{ aspectRatio: `${props.session.canvas.width} / ${props.session.canvas.height}` }}
         onPointerDown={(event) => { if (event.target === event.currentTarget) props.onSelect(null) }}
       >
+        <OutgoingTransitionVideo
+          preview={transitionPreview}
+          fit={props.session.canvas.fit}
+          className="preview-source-video preview-transition-previous"
+        />
         <video
           ref={videoRef}
+          className="preview-source-video"
           src={playbackPath}
-          style={{ objectFit: props.session.canvas.fit }}
+          style={{ objectFit: props.session.canvas.fit, ...transitionPreview?.styles.current }}
+          data-transition={transitionPreview?.active.effect}
           preload="auto"
           playsInline
           onLoadedData={() => setMediaError(null)}

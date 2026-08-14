@@ -53,11 +53,17 @@ input, select, textarea { color: #f5f6f8; background: #17191e; border: 1px solid
 .workspace { flex: 1; min-height: 0; display: grid; grid-template-columns: 250px minmax(520px, 1fr); }
 .side-panel { min-width: 0; min-height: 0; display: flex; flex-direction: column; padding: 12px; background: #15161a; border-right: 1px solid #292c33; }
 .side-brand { display: flex; align-items: center; gap: 9px; padding: 0 2px 10px; font-size: 18px; }.side-brand img { width: 32px; height: 32px; border-radius: 8px; }
-.project-actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; padding-bottom: 12px; border-bottom: 1px solid #2b2e35; }.project-actions button { padding: 7px 3px; font-size: 10px; }.project-actions .export-button { grid-column: 1 / -1; font-size: 11px; }
+.project-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding-bottom: 12px; border-bottom: 1px solid #2b2e35; }.project-actions button { padding: 7px 3px; font-size: 10px; }.project-actions .export-button { grid-column: 1 / -1; font-size: 11px; }
 .source-name { padding: 8px 2px 0; overflow: hidden; color: #858b96; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .asset-panel, .inspector { flex: 1; min-width: 0; min-height: 0; overflow: hidden; padding-top: 12px; background: #15161a; }
 .asset-panel { display: flex; flex-direction: column; gap: 10px; }
 .add-menu { overflow-y: auto; }
+.add-heading { margin-top: 5px; padding-top: 10px; border-top: 1px solid #2b2e35; }
+.insert-menu { overflow-y: auto; }
+.insert-menu .empty-note { margin: 0 0 2px; }
+.insert-menu .stacked-control { margin: 3px 0; }
+.insert-menu .stacked-control select { width: 100%; padding: 7px; }
+.select-video-button { margin-top: 4px; background: #365b50; border-color: #4b8171; font-weight: 700; }
 .category-menu { position: relative; overflow: visible; padding-bottom: 2px; }
 .inspector { overflow-y: auto; }
 .panel-heading { display: flex; justify-content: space-between; align-items: center; gap: 8px; min-height: 30px; }
@@ -81,8 +87,8 @@ input, select, textarea { color: #f5f6f8; background: #17191e; border: 1px solid
 .editor-column { min-width: 0; min-height: 0; display: grid; grid-template-rows: minmax(300px, 1fr) 98px; background: #0d0e11; }
 .preview-shell { min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 4px 8px 0; overflow: hidden; }
 .preview-stage { container-type: size; position: relative; height: calc(100% - 40px); width: auto; max-width: 100%; margin: auto; background: #000; overflow: hidden; box-shadow: 0 8px 35px #000a; user-select: none; }
-.preview-stage > video { display: block; width: 100%; height: 100%; object-fit: contain; }
-.preview-error { position: absolute; inset: 0; display: grid; place-items: center; padding: 24px; color: #ffc5c5; background: #210d0dcc; text-align: center; }
+.preview-source-video { position: absolute; inset: 0; display: block; width: 100%; height: 100%; object-fit: contain; transform-origin: center; }
+.preview-error { position: absolute; z-index: 10; inset: 0; display: grid; place-items: center; padding: 24px; color: #ffc5c5; background: #210d0dcc; text-align: center; }
 .transport { position: relative; width: 100%; height: 40px; flex: 0 0 40px; display: flex; align-items: center; justify-content: flex-start; gap: 6px; font-variant-numeric: tabular-nums; color: #aab0ba; font-size: 11px; }
 .transport button { padding: 4px 7px; font-size: 11px; }
 .transport .play-button { min-width: 94px; padding-inline: 14px; background: #54dba8; border-color: #54dba8; color: #07140f; font-weight: 800; }
@@ -100,6 +106,7 @@ input, select, textarea { color: #f5f6f8; background: #17191e; border: 1px solid
 .timeline { position: relative; min-width: 100%; height: 86px; background: #191b20; border-radius: 6px; overflow: hidden; }
 .video-track { position: absolute; display: flex; left: 0; right: 0; top: 4px; height: 38px; }
 .source-segment { position: relative; min-width: 2px; border: 1px solid #3b6977; background: #284a56; overflow: hidden; }
+.source-segment[data-transition]::before { content: ''; position: absolute; z-index: 2; left: 0; top: 0; bottom: 0; width: 8px; background: linear-gradient(90deg, #54dba8, transparent); }
 .waveform { position: absolute; inset: 0; width: 100%; height: 100%; }.waveform path { fill: #9fd9e7; opacity: .72; }
 .overlay-track { position: absolute; left: 0; right: 0; top: 49px; height: 30px; }
 .timeline-overlay { position: absolute; height: 27px; min-width: 5px; padding: 2px 5px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: #101114; border: 1px solid #fff4; font-size: 10px; text-align: left; }
@@ -109,7 +116,7 @@ input, select, textarea { color: #f5f6f8; background: #17191e; border: 1px solid
 .playhead { position: absolute; z-index: 4; top: 0; bottom: 0; width: 1px; background: #ffda63; pointer-events: none; }.playhead::before { content: ''; position: absolute; left: -4px; width: 9px; height: 8px; background: #ffda63; clip-path: polygon(0 0,100% 0,50% 100%); }
 .timeline-hover-preview { position: fixed; z-index: 20; padding: 5px; border: 1px solid #5a6573; border-radius: 5px; background: #101216f2; box-shadow: 0 8px 24px #000b; pointer-events: none; }
 .timeline-hover-frame { position: relative; overflow: hidden; background: #000; }
-.timeline-hover-frame > video { display: block; width: 100%; height: 100%; background: #000; }
+.timeline-hover-frame > video { position: absolute; inset: 0; display: block; width: 100%; height: 100%; background: #000; transform-origin: center; }
 .timeline-hover-overlay { position: absolute; overflow: hidden; pointer-events: none; }
 .timeline-hover-overlay img, .timeline-hover-overlay video { display: block; width: 100%; height: 100%; object-fit: contain; }
 .timeline-hover-text { white-space: pre-wrap; overflow-wrap: anywhere; }

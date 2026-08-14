@@ -63,17 +63,40 @@ describe('editor store', () => {
     ])
   })
 
+  it('restores bounded undo and redo history', async () => {
+    const previous = createSession(metadata)
+    const current = structuredClone(previous)
+    current.cutPoints = [2]
+    const future = structuredClone(current)
+    future.cutPoints = [2, 4]
+    vi.mocked(window.catcut.loadSession).mockResolvedValue(savedSession(current, [previous], [future]))
+
+    await useEditorStore.getState().initialize()
+    expect(useEditorStore.getState()).toMatchObject({ history: [{ cutPoints: [] }], future: [{ cutPoints: [2, 4] }] })
+    useEditorStore.getState().undo()
+    expect(useEditorStore.getState().session?.cutPoints).toEqual([])
+    useEditorStore.getState().redo()
+    expect(useEditorStore.getState().session?.cutPoints).toEqual([2])
+    useEditorStore.getState().redo()
+    expect(useEditorStore.getState().session?.cutPoints).toEqual([2, 4])
+  })
+
   it('inserts a video at the playhead and undoes the ripple edit', async () => {
     await useEditorStore.getState().loadVideo('/source.mp4')
     useEditorStore.getState().setPlayhead(4)
     const inserted = { ...metadata, path: '/inserted.mp4', name: 'inserted.mp4', duration: 2 }
     vi.mocked(window.catcut.openVideo).mockResolvedValue('/inserted.mp4')
     vi.mocked(window.catcut.probe).mockResolvedValueOnce(inserted)
-    await useEditorStore.getState().insertVideo()
+    await useEditorStore.getState().insertVideo({
+      into: { effect: 'dissolve', duration: 0.5 },
+      back: { effect: 'slideleft', duration: 0.75 }
+    })
     const session = useEditorStore.getState().session
     expect(session?.sources).toHaveLength(2)
     expect(session?.segments.map((segment) => segment.sourceEnd - segment.sourceStart)).toEqual([4, 2, 6])
     expect(session?.segments[1]?.sourceId).toBe(session?.sources[1]?.id)
+    expect(session?.segments[1]?.transition).toEqual({ effect: 'dissolve', duration: 0.5 })
+    expect(session?.segments[2]?.transition).toEqual({ effect: 'slideleft', duration: 0.75 })
     useEditorStore.getState().undo()
     expect(useEditorStore.getState().session?.segments).toHaveLength(1)
   })

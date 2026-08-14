@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { AssetItem } from '@shared/types'
+import type { AssetItem, InsertTransitions, TransitionEffect } from '@shared/types'
 
 export type AssetCategory = Exclude<AssetItem['type'], 'gif'>
 
@@ -9,6 +9,7 @@ interface AssetPanelProps {
   onCategory: (category: AssetCategory | null) => void
   onText: () => void
   onNew: () => void
+  onInsert: (transitions: InsertTransitions) => void
   onAsset: (asset: AssetItem) => void
   onError: (message: string) => void
 }
@@ -16,6 +17,19 @@ interface AssetPanelProps {
 const categoryNames: Record<AssetCategory, string> = {
   image: 'Images', video: 'Videos', audio: 'Audio'
 }
+
+const transitionOptions: { value: TransitionEffect | 'none'; label: string }[] = [
+  { value: 'none', label: 'None' },
+  { value: 'fade', label: 'Fade' },
+  { value: 'dissolve', label: 'Soft dissolve' },
+  { value: 'wipeleft', label: 'Wipe left' },
+  { value: 'wiperight', label: 'Wipe right' },
+  { value: 'slideleft', label: 'Slide left' },
+  { value: 'slideright', label: 'Slide right' },
+  { value: 'circleopen', label: 'Circle reveal' },
+  { value: 'zoomin', label: 'Zoom in' },
+  { value: 'hblur', label: 'Blur' }
+]
 
 function inCategory(asset: AssetItem, category: AssetCategory | null): boolean {
   if (category === 'video') return asset.type === 'video' || asset.type === 'gif'
@@ -83,10 +97,14 @@ function HoverPreview({ asset }: { asset: AssetItem | null }): React.JSX.Element
   )
 }
 
-function AddMenu({ onCategory, onText, onNew }: Pick<AssetPanelProps, 'onCategory' | 'onText' | 'onNew'>): React.JSX.Element {
+function AddMenu({ onCategory, onText, onNew, onInsert }: Pick<AssetPanelProps, 'onCategory' | 'onText' | 'onNew'> & {
+  onInsert: () => void
+}): React.JSX.Element {
   return (
     <section className="asset-panel add-menu">
-      <div className="panel-heading"><strong>Add</strong></div>
+      <div className="panel-heading"><strong>Insert</strong></div>
+      <button className="wide-button" onClick={onInsert}>Video</button>
+      <div className="panel-heading add-heading"><strong>Add</strong></div>
       <div className="quick-add">
         <button onClick={onText}>Text</button>
         <button onClick={() => onCategory('image')}>Images</button>
@@ -98,8 +116,67 @@ function AddMenu({ onCategory, onText, onNew }: Pick<AssetPanelProps, 'onCategor
   )
 }
 
+function TransitionSelect({ label, value, onChange }: {
+  label: string
+  value: TransitionEffect | 'none'
+  onChange: (effect: TransitionEffect | 'none') => void
+}): React.JSX.Element {
+  return (
+    <label className="stacked-control">
+      <span>{label}</span>
+      <select value={value} onChange={(event) => onChange(event.target.value as TransitionEffect | 'none')}>
+        {transitionOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+      </select>
+    </label>
+  )
+}
+
+function InsertVideoPanel({ onBack, onInsert }: {
+  onBack: () => void
+  onInsert: AssetPanelProps['onInsert']
+}): React.JSX.Element {
+  const [into, setInto] = useState<TransitionEffect | 'none'>('none')
+  const [back, setBack] = useState<TransitionEffect | 'none'>('none')
+  const [duration, setDuration] = useState(0.65)
+  const transitionsEnabled = into !== 'none' || back !== 'none'
+
+  const selectVideo = (): void => {
+    onInsert({
+      ...(into === 'none' ? {} : { into: { effect: into, duration } }),
+      ...(back === 'none' ? {} : { back: { effect: back, duration } })
+    })
+  }
+
+  return (
+    <section className="asset-panel insert-menu">
+      <div className="panel-heading">
+        <button onClick={onBack}>← Back</button>
+        <strong>Insert video</strong>
+      </div>
+      <p className="empty-note">Choose optional transitions for both sides of the inserted clip.</p>
+      <TransitionSelect label="Into inserted video" value={into} onChange={setInto} />
+      <TransitionSelect label="Back to timeline" value={back} onChange={setBack} />
+      <label className="stacked-control">
+        <span>Transition duration</span>
+        <select
+          disabled={!transitionsEnabled}
+          value={duration}
+          onChange={(event) => setDuration(Number(event.target.value))}
+        >
+          <option value={0.35}>0.35 seconds</option>
+          <option value={0.65}>0.65 seconds</option>
+          <option value={1}>1 second</option>
+          <option value={1.5}>1.5 seconds</option>
+        </select>
+      </label>
+      <button className="wide-button select-video-button" onClick={selectVideo}>Select video</button>
+    </section>
+  )
+}
+
 export function AssetPanel(props: AssetPanelProps): React.JSX.Element {
   const [filter, setFilter] = useState('')
+  const [inserting, setInserting] = useState(false)
   const [previewing, setPreviewing] = useState<string | null>(null)
   const [hovered, setHovered] = useState<AssetItem | null>(null)
   const preview = useRef<HTMLAudioElement | null>(null)
@@ -130,7 +207,17 @@ export function AssetPanel(props: AssetPanelProps): React.JSX.Element {
     }
   }
 
-  if (!props.category) return <AddMenu onCategory={props.onCategory} onText={props.onText} onNew={props.onNew} />
+  if (inserting) {
+    return <InsertVideoPanel onBack={() => setInserting(false)} onInsert={props.onInsert} />
+  }
+  if (!props.category) {
+    return <AddMenu
+      onCategory={props.onCategory}
+      onText={props.onText}
+      onNew={props.onNew}
+      onInsert={() => setInserting(true)}
+    />
+  }
   const goBack = (): void => {
     setFilter('')
     setHovered(null)

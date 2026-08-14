@@ -9,7 +9,14 @@ import {
   protocol
 } from 'electron'
 import packageMetadata from '../../package.json'
-import type { ExportRequest, GpuDiagnostics, Overlay, SavedSession } from '../types'
+import type {
+  ExportRequest,
+  GpuDiagnostics,
+  MediaMetadata,
+  Overlay,
+  SavedSession,
+  SavedSessionSnapshot
+} from '../types'
 import { categoryFor, displayName, scanAssets } from './assets'
 import { exportVideo } from './exporter'
 import { jobs } from './jobs'
@@ -197,10 +204,32 @@ function statePath(): string {
   return join(app.getPath('userData'), 'editor-state.json')
 }
 
+function authorizeSavedSnapshot(snapshot: SavedSessionSnapshot, paths: SessionPathRegistry): void {
+  snapshot.sources.forEach((source) => paths.assertReadable(source.metadata.path))
+  snapshot.overlays.forEach((overlay) => authorizeOverlay(overlay, paths))
+}
+
+function authorizedSessionStack(
+  snapshots: SavedSessionSnapshot[] | undefined,
+  paths: SessionPathRegistry
+): SavedSessionSnapshot[] {
+  return (snapshots ?? []).filter((snapshot) => {
+    try {
+      authorizeSavedSnapshot(snapshot, paths)
+      return true
+    } catch {
+      return false
+    }
+  })
+}
+
 function authorizeSavedSession(session: SavedSession, paths: SessionPathRegistry): SavedSession {
-  session.sources.forEach((source) => paths.assertReadable(source.metadata.path))
-  session.overlays.forEach((overlay) => authorizeOverlay(overlay, paths))
-  return session
+  authorizeSavedSnapshot(session, paths)
+  return {
+    ...session,
+    history: authorizedSessionStack(session.history, paths),
+    future: authorizedSessionStack(session.future, paths)
+  }
 }
 
 async function saveSession(value: unknown, paths: SessionPathRegistry): Promise<void> {
@@ -212,17 +241,51 @@ async function loadSession(paths: SessionPathRegistry): Promise<SavedSession | n
   try {
     const saved = await loadSessionFile(statePath())
     if (!saved) return null
-    const sources = await Promise.all(saved.sources.map(async (source) => ({
-      id: source.id,
-      metadata: await probeMedia(await paths.allowRead(source.metadata.path))
-    })))
-    const overlays = await Promise.all(saved.overlays.map(async (overlay) => overlay.type === 'text'
-      ? overlay
-      : { ...overlay, path: await paths.allowRead(overlay.path) }))
-    return parseSavedSession({ ...saved, sources, overlays })
+    const metadata = new Map<string, Promise<MediaMetadata>>()
+    const session = await refreshSavedSnapshot(saved, paths, metadata)
+    const [history, future] = await Promise.all([
+      refreshSessionStack(saved.history, paths, metadata),
+      refreshSessionStack(saved.future, paths, metadata)
+    ])
+    return parseSavedSession({ ...session, history, future })
   } catch {
     return null
   }
+}
+
+async function refreshSavedSnapshot(
+  snapshot: SavedSessionSnapshot,
+  paths: SessionPathRegistry,
+  metadata: Map<string, Promise<MediaMetadata>>
+): Promise<SavedSessionSnapshot> {
+  const sources = await Promise.all(snapshot.sources.map(async (source) => {
+    let refreshed = metadata.get(source.metadata.path)
+    if (!refreshed) {
+      refreshed = paths.allowRead(source.metadata.path).then(probeMedia)
+      metadata.set(source.metadata.path, refreshed)
+    }
+    return { id: source.id, metadata: await refreshed }
+  }))
+  const overlays = await Promise.all(snapshot.overlays.map(async (overlay) => overlay.type === 'text'
+    ? overlay
+    : { ...overlay, path: await paths.allowRead(overlay.path) }))
+  return { ...snapshot, sources, overlays }
+}
+
+async function refreshSessionStack(
+  snapshots: SavedSessionSnapshot[] | undefined,
+  paths: SessionPathRegistry,
+  metadata: Map<string, Promise<MediaMetadata>>
+): Promise<SavedSessionSnapshot[]> {
+  const restored = await Promise.all((snapshots ?? []).map(async (snapshot) => {
+    try {
+      return await refreshSavedSnapshot(snapshot, paths, metadata)
+    } catch {
+      // A missing file used only by an old undo entry must not hide the current project.
+      return null
+    }
+  }))
+  return restored.filter((snapshot): snapshot is SavedSessionSnapshot => snapshot !== null)
 }
 
 async function trustedAssetMetadata(path: string, paths: SessionPathRegistry): Promise<Awaited<ReturnType<typeof probeAsset>>> {

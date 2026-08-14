@@ -1,4 +1,5 @@
 import { basename } from 'node:path'
+import { transitionEffects } from '../types'
 import type {
   ExportRequest,
   ExportSource,
@@ -6,7 +7,9 @@ import type {
   Overlay,
   ProjectCanvas,
   SavedSession,
-  SourceSegment
+  SavedSessionSnapshot,
+  SourceSegment,
+  VideoTransition
 } from '../types'
 
 type UnknownRecord = Record<string, unknown>
@@ -108,7 +111,23 @@ function parseSegment(value: unknown, sources: Map<string, MediaMetadata>): Sour
   const sourceStart = number(input.sourceStart, 'Segment start', 0, sourceDuration)
   const sourceEnd = number(input.sourceEnd, 'Segment end', 0, sourceDuration)
   if (sourceEnd <= sourceStart) throw new Error('Timeline segments must have positive duration')
-  return { id: identifier(input.id, 'Segment ID'), sourceId, sourceStart, sourceEnd }
+  const transition = parseTransition(input.transition, sourceEnd - sourceStart)
+  return {
+    id: identifier(input.id, 'Segment ID'),
+    sourceId,
+    sourceStart,
+    sourceEnd,
+    ...(transition ? { transition } : {})
+  }
+}
+
+function parseTransition(value: unknown, segmentDuration: number): VideoTransition | undefined {
+  if (value === undefined) return undefined
+  const input = record(value, 'Segment transition')
+  return {
+    effect: oneOf(input.effect, transitionEffects, 'Transition effect'),
+    duration: number(input.duration, 'Transition duration', 0.05, Math.min(5, segmentDuration))
+  }
 }
 
 function validateOverlayBase(input: UnknownRecord, timelineDuration: number): void {
@@ -227,7 +246,9 @@ function parseSegments(value: unknown, sources: Map<string, MediaMetadata>): Sou
   if (!Array.isArray(value) || value.length > 10_000) {
     throw new Error('Timeline segments must be an array')
   }
-  return value.map((segment) => parseSegment(segment, sources))
+  const segments = value.map((segment) => parseSegment(segment, sources))
+  if (segments[0]?.transition) throw new Error('The first timeline segment cannot have a transition')
+  return segments
 }
 
 function parseOverlays(value: unknown, duration: number): Overlay[] {
@@ -237,8 +258,8 @@ function parseOverlays(value: unknown, duration: number): Overlay[] {
   return value.map((overlay) => validateOverlay(overlay, duration))
 }
 
-export function parseSavedSession(value: unknown): SavedSession {
-  const input = record(value, 'Saved session')
+function parseSavedSessionSnapshot(value: unknown): SavedSessionSnapshot {
+  const input = record(value, 'Saved session snapshot')
   const timeline = parseExportRequest({ ...input, outputPath: '/saved-session.mp4' })
   const duration = timeline.segments.reduce((sum, segment) => sum + segment.sourceEnd - segment.sourceStart, 0)
   const selectedOverlayId = input.selectedOverlayId === null
@@ -258,5 +279,22 @@ export function parseSavedSession(value: unknown): SavedSession {
     playhead: number(input.playhead, 'Playhead', 0, duration),
     cutPoints,
     dirty: boolean(input.dirty, 'Dirty state')
+  }
+}
+
+function parseSessionStack(value: unknown, label: string): SavedSessionSnapshot[] {
+  if (!Array.isArray(value) || value.length > 50) {
+    throw new Error(`${label} must be an array with at most 50 entries`)
+  }
+  return value.map(parseSavedSessionSnapshot)
+}
+
+export function parseSavedSession(value: unknown): SavedSession {
+  const input = record(value, 'Saved session')
+  const session = parseSavedSessionSnapshot(input)
+  return {
+    ...session,
+    ...(input.history === undefined ? {} : { history: parseSessionStack(input.history, 'Undo history') }),
+    ...(input.future === undefined ? {} : { future: parseSessionStack(input.future, 'Redo history') })
   }
 }

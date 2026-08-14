@@ -131,4 +131,39 @@ describe('FFmpeg export graph', () => {
     expect(graph).toContain('concat=n=2:v=1:a=0')
     expect(graph).toContain('concat=n=2:v=0:a=1')
   })
+
+  it('keeps duration while transitioning into and back from an inserted clip', () => {
+    const source = {
+      path: '/source.mp4', name: 'source.mp4', size: 100, modifiedAt: 1, duration: 5,
+      width: 320, height: 180, fps: 24, videoCodec: 'h264', audioCodec: 'aac',
+      hasAudio: true, rotation: 0, pixelFormat: 'yuv420p'
+    }
+    const request: ExportRequest = {
+      canvas: { width: 320, height: 180, fps: 24, fit: 'contain' },
+      sources: [
+        { id: 'source', metadata: source },
+        { id: 'inserted', metadata: { ...source, path: '/inserted.mp4', name: 'inserted.mp4', duration: 1 } }
+      ],
+      outputPath: '/transitioned.mp4',
+      segments: [
+        { id: 'left', sourceId: 'source', sourceStart: 0, sourceEnd: 2 },
+        {
+          id: 'inserted', sourceId: 'inserted', sourceStart: 0, sourceEnd: 1,
+          transition: { effect: 'dissolve', duration: 0.35 }
+        },
+        {
+          id: 'right', sourceId: 'source', sourceStart: 2, sourceEnd: 5,
+          transition: { effect: 'circleopen', duration: 0.65 }
+        }
+      ],
+      overlays: []
+    }
+    const graph = buildFilterGraph(request, []).graph
+    expect(graph).toContain('[vseg0]tpad=stop_mode=clone:stop_duration=0.350000[vhold1]')
+    expect(graph).toContain('[vhold1][vseg1]xfade=transition=dissolve:duration=0.350000:offset=2.000000[vjoin1]')
+    expect(graph).toContain('[vjoin1]tpad=stop_mode=clone:stop_duration=0.650000[vhold2]')
+    expect(graph).toContain('[vhold2][vseg2]xfade=transition=circleopen:duration=0.650000:offset=3.000000[vjoin2]')
+    expect(graph).toContain('[vjoin2]null[basev]')
+    expect(graph).toContain('concat=n=3:v=0:a=1')
+  })
 })

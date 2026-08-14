@@ -24,11 +24,30 @@ export interface AssetMetadata {
   playbackPath?: string
 }
 
+export const transitionEffects = [
+  'fade', 'dissolve', 'wipeleft', 'wiperight', 'slideleft',
+  'slideright', 'circleopen', 'zoomin', 'hblur'
+] as const
+
+export type TransitionEffect = typeof transitionEffects[number]
+
+export interface VideoTransition {
+  effect: TransitionEffect
+  duration: number
+}
+
+export interface InsertTransitions {
+  into?: VideoTransition
+  back?: VideoTransition
+}
+
 export interface SourceSegment {
   id: string
   sourceId: string
   sourceStart: number
   sourceEnd: number
+  /** Transition from the preceding segment into this segment. */
+  transition?: VideoTransition
 }
 
 export interface ExportSource {
@@ -134,7 +153,7 @@ export interface ExportRequest {
   overlays: Overlay[]
 }
 
-export interface SavedSession {
+export interface SavedSessionSnapshot {
   canvas: ProjectCanvas
   sources: ExportSource[]
   segments: SourceSegment[]
@@ -143,6 +162,11 @@ export interface SavedSession {
   playhead: number
   cutPoints: number[]
   dirty: boolean
+}
+
+export interface SavedSession extends SavedSessionSnapshot {
+  history?: SavedSessionSnapshot[]
+  future?: SavedSessionSnapshot[]
 }
 
 export type JobKind = 'proxy' | 'export' | 'thumbnail' | 'waveform' | 'asset-pack'

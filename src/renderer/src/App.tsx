@@ -147,8 +147,10 @@ export default function App(): React.JSX.Element {
       if (window.confirm('Reset the current project and forget its saved state?')) void store.resetProject()
     })
     const removeSaveListener = window.catcut.onSaveRequest(async () => {
-      const current = useEditorStore.getState().session
-      if (current) await window.catcut.saveSession(savedSession(current))
+      const current = useEditorStore.getState()
+      if (current.session) {
+        await window.catcut.saveSession(savedSession(current.session, current.history, current.future))
+      }
     })
     return () => {
       removeJobListener()

@@ -11,7 +11,9 @@ import {
   sourceForSegment,
   timelineDuration
 } from '../model/timeline'
+import { transitionPreviewAtOutputTime } from '../model/transitions'
 import { waveformPath } from '../model/waveform'
+import { OutgoingTransitionVideo } from './TransitionPreview'
 
 interface TimelineProps {
   session: EditSession
@@ -142,6 +144,23 @@ function useTimelineOverlaySeek(
   }, [mediaRef, overlay, sourceTime, url])
 }
 
+function useVideoFrame(
+  videoRef: React.RefObject<HTMLVideoElement | null>,
+  path: string,
+  sourceTime: number
+): void {
+  useEffect(() => {
+    const video = videoRef.current
+    if (!video || !path) return
+    const seek = (): void => { video.currentTime = sourceTime }
+    if (video.readyState >= 1) seek()
+    else {
+      video.addEventListener('loadedmetadata', seek, { once: true })
+      return () => video.removeEventListener('loadedmetadata', seek)
+    }
+  }, [path, sourceTime, videoRef])
+}
+
 function TimelineOverlay({ overlay, outputTime, frameHeight }: {
   overlay: Exclude<Overlay, { type: 'audio' }>
   outputTime: number
@@ -168,20 +187,12 @@ function TimelineOverlay({ overlay, outputTime, frameHeight }: {
 
 function TimelineHoverFrame({ session, preview }: { session: EditSession; preview: HoverPreview }): React.JSX.Element {
   const previewVideo = useRef<HTMLVideoElement>(null)
+  const transitionPreview = transitionPreviewAtOutputTime(session, preview.outputTime)
   const overlays = session.overlays
     .filter((overlay): overlay is Exclude<Overlay, { type: 'audio' }> => overlay.type !== 'audio' && overlayAtTime(overlay, preview.outputTime))
     .sort((left, right) => left.zIndex - right.zIndex)
 
-  useEffect(() => {
-    const video = previewVideo.current
-    if (!video || !preview.path) return
-    const seek = (): void => { video.currentTime = preview.sourceTime }
-    if (video.readyState >= 1) seek()
-    else {
-      video.addEventListener('loadedmetadata', seek, { once: true })
-      return () => video.removeEventListener('loadedmetadata', seek)
-    }
-  }, [preview.path, preview.sourceTime])
+  useVideoFrame(previewVideo, preview.path, preview.sourceTime)
 
   return (
     <div
@@ -189,7 +200,16 @@ function TimelineHoverFrame({ session, preview }: { session: EditSession; previe
       style={{ width: preview.frameWidth, height: preview.frameHeight }}
       aria-label={`Frame at ${formatTime(preview.outputTime, session.canvas.fps)}`}
     >
-      <video ref={previewVideo} src={preview.path} muted preload="auto" playsInline style={{ objectFit: session.canvas.fit }} />
+      <OutgoingTransitionVideo preview={transitionPreview} fit={session.canvas.fit} />
+      <video
+        ref={previewVideo}
+        src={preview.path}
+        muted
+        preload="auto"
+        playsInline
+        style={{ objectFit: session.canvas.fit, ...transitionPreview?.styles.current }}
+        data-transition={transitionPreview?.active.effect}
+      />
       {overlays.map((overlay) => <TimelineOverlay key={overlay.id} overlay={overlay} outputTime={preview.outputTime} frameHeight={preview.frameHeight} />)}
     </div>
   )
@@ -255,8 +275,9 @@ export function Timeline({
               return <div
                 key={segment.id}
                 className="source-segment"
+                data-transition={segment.transition?.effect}
                 style={{ width: `${((segment.sourceEnd - segment.sourceStart) / duration) * 100}%` }}
-                title={source?.metadata.name ?? 'Video'}
+                title={`${source?.metadata.name ?? 'Video'}${segment.transition ? ` · ${segment.transition.effect} ${segment.transition.duration}s` : ''}`}
               >
                 <svg className="waveform" viewBox="0 0 100 40" preserveAspectRatio="none" aria-label="Audio waveform">
                   <path d={waveformPath(source?.waveform ?? [], segment.sourceStart, segment.sourceEnd, source?.metadata.duration ?? 0)} />

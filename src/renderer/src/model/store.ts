@@ -3,9 +3,11 @@ import type {
   AssetItem,
   EditSession,
   GpuDiagnostics,
+  InsertTransitions,
   JobProgress,
   Overlay,
   SavedSession,
+  SavedSessionSnapshot,
   TimelineSource,
   VideoOverlay
 } from '@shared/types'
@@ -36,7 +38,7 @@ export interface EditorState {
   initialize: () => Promise<void>
   loadVideo: (path?: string, short?: boolean) => Promise<void>
   openShort: () => Promise<void>
-  insertVideo: () => Promise<void>
+  insertVideo: (transitions?: InsertTransitions) => Promise<void>
   resetProject: () => Promise<void>
   setPlayhead: (time: number) => void
   setPlaybackPath: (path: string) => Promise<void>
@@ -90,7 +92,7 @@ function patchedOverlaySession(session: EditSession, id: string, patch: Partial<
   }
 }
 
-export function savedSession(session: EditSession): SavedSession {
+function savedSnapshot(session: EditSession): SavedSessionSnapshot {
   return {
     canvas: session.canvas,
     sources: session.sources.map(({ id, metadata }) => ({ id, metadata })),
@@ -103,13 +105,49 @@ export function savedSession(session: EditSession): SavedSession {
   }
 }
 
-async function restoredSession(saved: SavedSession): Promise<EditSession> {
+export function savedSession(
+  session: EditSession,
+  history: EditSession[] = [],
+  future: EditSession[] = []
+): SavedSession {
+  return {
+    ...savedSnapshot(session),
+    history: history.slice(-50).map(savedSnapshot),
+    future: future.slice(0, 50).map(savedSnapshot)
+  }
+}
+
+async function restoredSession(
+  saved: SavedSessionSnapshot,
+  pathUrl: (path: string) => Promise<string>
+): Promise<EditSession> {
   const sources = await Promise.all(saved.sources.map(async (source) => ({
     ...source,
-    playbackPath: await window.catcut.getPathUrl(source.metadata.path),
+    playbackPath: await pathUrl(source.metadata.path),
     waveform: []
   })))
   return { ...saved, sources }
+}
+
+async function restoredEditorState(saved: SavedSession): Promise<{
+  session: EditSession
+  history: EditSession[]
+  future: EditSession[]
+}> {
+  const urls = new Map<string, Promise<string>>()
+  const pathUrl = (path: string): Promise<string> => {
+    const existing = urls.get(path)
+    if (existing) return existing
+    const pending = window.catcut.getPathUrl(path)
+    urls.set(path, pending)
+    return pending
+  }
+  const [session, history, future] = await Promise.all([
+    restoredSession(saved, pathUrl),
+    Promise.all((saved.history ?? []).map((snapshot) => restoredSession(snapshot, pathUrl))),
+    Promise.all((saved.future ?? []).map((snapshot) => restoredSession(snapshot, pathUrl)))
+  ])
+  return { session, history, future }
 }
 
 export const useEditorStore = create<EditorState>((set, get) => {
@@ -121,7 +159,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
   } : state)
 
   const loadWaveform = (source: TimelineSource): void => {
-    if (!source.metadata.hasAudio) return
+    if (!source.metadata.hasAudio || source.waveform.length > 0) return
     void window.catcut.waveform(source.metadata.path)
       .then((waveform) => patchSource(source.id, { waveform }))
       .catch(() => undefined)
@@ -155,9 +193,16 @@ export const useEditorStore = create<EditorState>((set, get) => {
         window.catcut.scanAssets(),
         window.catcut.loadSession()
       ])
-      const session = saved ? await restoredSession(saved) : null
-      set({ gpu, assets, session, initialized: true })
-      session?.sources.forEach(loadWaveform)
+      const restored = saved ? await restoredEditorState(saved) : null
+      set({
+        gpu,
+        assets,
+        session: restored?.session ?? null,
+        history: restored?.history ?? [],
+        future: restored?.future ?? [],
+        initialized: true
+      })
+      restored?.session.sources.forEach(loadWaveform)
     } catch {
       set({ initialized: true, error: 'CatCut could not finish starting. Close it and try again.' })
     }
@@ -189,7 +234,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
     await get().loadVideo(undefined, true)
   },
 
-  async insertVideo() {
+  async insertVideo(transitions = {}) {
     const path = await window.catcut.openVideo()
     if (!path || !get().session) return
     try {
@@ -203,7 +248,12 @@ export const useEditorStore = create<EditorState>((set, get) => {
       set((state) => {
         if (!state.session) return { busy: null }
         return {
-          ...mutation(state, (session) => insertSourceAtOutputTime(session, source, session.playhead)),
+          ...mutation(state, (session) => insertSourceAtOutputTime(
+            session,
+            source,
+            session.playhead,
+            transitions
+          )),
           busy: null
         }
       })
@@ -403,6 +453,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
         future: [cloneSession(state.session), ...state.future].slice(0, 50)
       }
     })
+    get().session?.sources.forEach(loadWaveform)
   },
 
   redo() {
@@ -416,6 +467,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
         future: state.future.slice(1)
       }
     })
+    get().session?.sources.forEach(loadWaveform)
   },
 
   setJob(job) { set({ job }) },
