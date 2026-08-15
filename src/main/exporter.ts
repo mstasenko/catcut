@@ -6,10 +6,11 @@ import { tmpdir } from 'node:os'
 import { promisify } from 'node:util'
 import type { ExportRequest, Overlay, TextOverlay, VisualOverlayBase } from '../types'
 import { ffmpegPath, ffprobePath } from './binaries'
-import { exportEncoder, softwareEncoder } from './export-encoder'
+import { exportEncoders } from './export-encoder'
 import { jobs } from './jobs'
 
 const execFileAsync = promisify(execFile)
+type Encoder = Awaited<ReturnType<typeof exportEncoders>>[number]
 
 interface PreparedInput {
   overlay: Overlay
@@ -418,6 +419,16 @@ async function overlayInputArgs(overlay: Overlay, directory: string): Promise<st
   return [...options, '-i', path]
 }
 
+function encoderGraph(encoder: Encoder, softwareGraph: string, videoLabel: string): string {
+  return encoder.filterSuffix
+    ? `${softwareGraph};[${videoLabel}]${encoder.filterSuffix}`
+    : softwareGraph
+}
+
+function canRetryEncoding(error: unknown, index: number, count: number): boolean {
+  return !isCancellation(error) && index < count - 1
+}
+
 async function encodeVideo(
   request: ExportRequest,
   directory: string,
@@ -427,29 +438,25 @@ async function encodeVideo(
 ): Promise<void> {
   const { inputArgs, preparedInputs } = await prepareInputs(request, directory)
   const filter = buildFilterGraph(request, preparedInputs)
-  const encoder = await exportEncoder()
-  const graph = encoder.filterSuffix
-    ? `${filter.graph};[${filter.videoLabel}]${encoder.filterSuffix}`
-    : filter.graph
-  const args = encoderArgs(encoder, inputArgs, filter, graph, duration, output)
-  try {
-    await jobs.run(encoder.executable, args, 'export', duration, request.outputPath, jobId)
-  } catch (error) {
-    if (!encoder.hardware || isCancellation(error)) throw error
-    // A short VAAPI probe cannot predict every real filter graph or driver
-    // failure, so software encoding is the reliability fallback for this job.
-    await rm(output, { force: true })
-    const fallback = softwareEncoder()
-    await jobs.run(
-      fallback.executable,
-      encoderArgs(fallback, inputArgs, filter, filter.graph, duration, output),
-      'export', duration, request.outputPath, jobId
-    )
+  const encoders = await exportEncoders()
+  for (const [index, encoder] of encoders.entries()) {
+    const graph = encoderGraph(encoder, filter.graph, filter.videoLabel)
+    try {
+      await jobs.run(
+        encoder.executable, encoderArgs(encoder, inputArgs, filter, graph, duration, output),
+        'export', duration, request.outputPath, jobId
+      )
+      return
+    } catch (error) {
+      if (!canRetryEncoding(error, index, encoders.length)) throw error
+      // The probe cannot predict every real filter graph or driver failure.
+      await rm(output, { force: true })
+    }
   }
 }
 
 function encoderArgs(
-  encoder: Awaited<ReturnType<typeof exportEncoder>>,
+  encoder: Encoder,
   inputArgs: string[],
   filter: ReturnType<typeof buildFilterGraph>,
   graph: string,

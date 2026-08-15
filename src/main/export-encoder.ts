@@ -4,7 +4,9 @@ import { promisify } from 'node:util'
 import { ffmpegPath } from './binaries'
 
 const execFileAsync = promisify(execFile)
-const ffmpegCandidates = ['/usr/bin/ffmpeg', '/usr/local/bin/ffmpeg']
+const systemFfmpegCandidates = ['/usr/bin/ffmpeg', '/usr/local/bin/ffmpeg']
+const vaapiCodecs = ['av1_vaapi', 'hevc_vaapi', 'h264_vaapi'] as const
+type VaapiCodec = typeof vaapiCodecs[number]
 
 export interface ExportEncoder {
   executable: string
@@ -18,6 +20,7 @@ export interface ExportEncoder {
 export interface RenderDevice {
   path: string
   vendor: string
+  pciSlot?: string
 }
 
 export function softwareEncoder(): ExportEncoder {
@@ -31,24 +34,26 @@ export function softwareEncoder(): ExportEncoder {
   }
 }
 
-function vaapiEncoder(executable: string, renderDevice: string): ExportEncoder {
+function vaapiEncoder(executable: string, renderDevice: string, codec: VaapiCodec): ExportEncoder {
   return {
     executable,
     input: ['-vaapi_device', renderDevice],
     filterSuffix: 'format=nv12,hwupload[hardwarev]',
     videoLabel: () => 'hardwarev',
-    output: ['-c:v', 'h264_vaapi', '-qp', '18'],
+    output: ['-c:v', codec, '-qp', '18'],
     hardware: true
   }
 }
 
 export function rankRenderDevices(devices: RenderDevice[]): RenderDevice[] {
-  // Intel is the preferred iGPU for this Ubuntu target, but every render node is
-  // probed so device numbering and mixed-GPU machines do not dictate selection.
+  // Intel's integrated graphics conventionally occupies PCI slot 00:02.0.
+  // Prefer another Intel device (such as Arc) while retaining every render node.
   return [...devices].sort((left, right) => {
-    const leftIntel = left.vendor.trim().toLowerCase() === '0x8086' ? 0 : 1
-    const rightIntel = right.vendor.trim().toLowerCase() === '0x8086' ? 0 : 1
-    return leftIntel - rightIntel || left.path.localeCompare(right.path)
+    const rank = (device: RenderDevice): number => {
+      if (device.vendor.trim().toLowerCase() !== '0x8086') return 2
+      return device.pciSlot && !device.pciSlot.endsWith(':00:02.0') ? 0 : 1
+    }
+    return rank(left) - rank(right) || left.path.localeCompare(right.path)
   })
 }
 
@@ -60,7 +65,10 @@ async function renderDevices(): Promise<RenderDevice[]> {
       .map(async (entry) => {
         const path = `/dev/dri/${entry.name}`
         const vendor = await readFile(`/sys/class/drm/${entry.name}/device/vendor`, 'utf8').catch(() => '')
-        return { path, vendor }
+        const pciSlot = await readFile(`/sys/class/drm/${entry.name}/device/uevent`, 'utf8')
+          .then((value) => /^PCI_SLOT_NAME=(.+)$/m.exec(value)?.[1] ?? '')
+          .catch(() => '')
+        return { path, vendor, pciSlot }
       }))
     return rankRenderDevices(devices)
   } catch {
@@ -68,44 +76,65 @@ async function renderDevices(): Promise<RenderDevice[]> {
   }
 }
 
-async function systemFfmpeg(): Promise<string | null> {
-  for (const path of ffmpegCandidates) {
+export function hardwareFfmpegCandidates(): string[] {
+  return [...new Set([ffmpegPath(), ...systemFfmpegCandidates])]
+}
+
+export function vaapiProbeArgs(renderDevice: string, codec: VaapiCodec): string[] {
+  return [
+    '-hide_banner', '-loglevel', 'error', '-vaapi_device', renderDevice,
+    '-f', 'lavfi', '-i', 'color=size=1280x720:duration=0.04',
+    '-vf', 'format=nv12,hwupload', '-c:v', codec, '-frames:v', '1', '-f', 'null', '-'
+  ]
+}
+
+async function availableFfmpegs(): Promise<string[]> {
+  const available: string[] = []
+  for (const path of hardwareFfmpegCandidates()) {
     try {
       await access(path)
-      return path
+      available.push(path)
     } catch {
       // Try the next trusted system location.
     }
   }
-  return null
+  return available
 }
 
-async function vaapiWorks(executable: string, renderDevice: string): Promise<boolean> {
+async function vaapiWorks(executable: string, renderDevice: string, codec: VaapiCodec): Promise<boolean> {
   try {
     await access(renderDevice)
-    await execFileAsync(executable, [
-      '-hide_banner', '-loglevel', 'error', '-vaapi_device', renderDevice,
-      '-f', 'lavfi', '-i', 'color=size=64x64:duration=0.04',
-      '-vf', 'format=nv12,hwupload', '-c:v', 'h264_vaapi', '-f', 'null', '-'
-    ], { timeout: 10_000 })
+    await execFileAsync(executable, vaapiProbeArgs(renderDevice, codec), { timeout: 10_000 })
     return true
   } catch {
     return false
   }
 }
 
-async function detectEncoder(): Promise<ExportEncoder> {
-  const executable = await systemFfmpeg()
-  if (!executable) return softwareEncoder()
-  for (const device of await renderDevices()) {
-    if (await vaapiWorks(executable, device.path)) return vaapiEncoder(executable, device.path)
+async function vaapiEncoders(executable: string, devices: RenderDevice[]): Promise<ExportEncoder[]> {
+  const encoders: ExportEncoder[] = []
+  for (const device of devices) {
+    for (const codec of vaapiCodecs) {
+      if (await vaapiWorks(executable, device.path, codec)) {
+        encoders.push(vaapiEncoder(executable, device.path, codec))
+      }
+    }
   }
-  return softwareEncoder()
+  return encoders
 }
 
-let cachedEncoder: Promise<ExportEncoder> | null = null
+async function detectEncoders(): Promise<ExportEncoder[]> {
+  const devices = await renderDevices()
+  for (const executable of await availableFfmpegs()) {
+    const hardware = await vaapiEncoders(executable, devices)
+    if (hardware.length) return [...hardware, softwareEncoder()]
+  }
+  return [softwareEncoder()]
+}
 
-export function exportEncoder(): Promise<ExportEncoder> {
-  cachedEncoder ??= detectEncoder()
-  return cachedEncoder
+let cachedEncoders: Promise<ExportEncoder[]> | null = null
+
+export function exportEncoders(): Promise<ExportEncoder[]> {
+  cachedEncoders ??= detectEncoders()
+  return cachedEncoders
 }

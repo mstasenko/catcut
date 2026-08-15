@@ -8,12 +8,15 @@ CatCut is a small, fast video editor for Ubuntu. It trims and combines videos an
 - Remove any number of unwanted ranges with simple cut points.
 - Add timed text, images, videos, and audio.
 - Move and resize visual overlays directly on the preview.
+- Insert additional videos with optional transitions, including fades, wipes, slides, zoom, and blur.
+- Create landscape videos or cropped 9:16 Shorts.
 - Preview images and videos before adding them.
-- Export at high quality using all CPU cores, or Intel iGPU acceleration when available.
+- Adjust overlay timing, opacity, volume, text styling, video audio, and looping.
+- Export at high quality using an Intel discrete GPU or iGPU when available, selecting the best supported hardware codec (AV1, HEVC, then H.264) and automatically falling back to another GPU or all CPU cores.
 - Use the optional, separately downloaded library of redistributable reaction media.
 - Undo and redo edits, including cut points.
 
-CatCut keeps no settings or unfinished projects after it closes. Exported videos are normal files and remain on disk.
+CatCut automatically restores the active project after it closes. Choose **Project → Reset project** to forget it and start over. Exported videos are normal files and remain on disk.
 
 ## Requirements
 
@@ -22,6 +25,17 @@ CatCut keeps no settings or unfinished projects after it closes. Exported videos
 - 64-bit Intel or AMD computer
 
 Other Linux desktops, X11, Windows, and macOS are not currently supported.
+
+### Intel hardware acceleration
+
+CatCut includes a VAAPI-enabled FFmpeg. On Intel systems, install the media driver and give your user access to GPU render devices:
+
+```bash
+sudo apt install intel-media-va-driver-non-free vainfo
+sudo usermod --append --groups render,video "$USER"
+```
+
+Log out and back in, then confirm that `id` lists `render` and `video` and that `vainfo --display drm --device /dev/dri/renderD128` succeeds. Render-node numbers may differ on multi-GPU systems. CatCut tries an Intel discrete GPU first, then an Intel iGPU, other VAAPI devices, and finally CPU encoding; no separate FFmpeg package is required.
 
 ## Install and run
 
@@ -72,11 +86,11 @@ Useful shortcuts:
 Install Node.js 22.22 or newer and npm 11.18, then run:
 
 ```bash
-npm ci
+npm install
 npm run dev
 ```
 
-FFmpeg is included through npm; a separate FFmpeg installation is not required for normal editing. Dependency versions are exact, install scripts are allowlisted, and newly published packages are delayed for seven days.
+FFmpeg is included through npm for development and as a pinned VAAPI-enabled release build in the AppImage; a separate FFmpeg installation is not required. Dependency versions are exact, install scripts are allowlisted, and newly published packages are delayed for seven days.
 
 Build a local AppImage and media-pack ZIP with:
 

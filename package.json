@@ -1,6 +1,6 @@
 {
   "name": "catcut",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "A focused, Wayland-native video editor",
   "author": "CatCut contributors",
   "desktopName": "catcut.desktop",
@@ -15,6 +15,7 @@
     "electron-winstaller": false,
     "esbuild@0.25.12": true,
     "esbuild@0.28.1": true,
+    "esbuild@0.28.2": true,
     "ffmpeg-static@5.3.0": true
   },
   "type": "module",
@@ -23,14 +24,15 @@
     "predev": "node scripts/ensure-meme-pack.mjs --quiet && node scripts/install-dev-desktop.mjs",
     "dev": "electron-vite dev --noSandbox --logLevel error",
     "build": "electron-vite build",
-    "package": "npm run build:meme-pack && npm run build && electron-builder --linux AppImage --publish never && node scripts/place-meme-pack.mjs",
+    "package": "npm run build:meme-pack && npm run build:ffmpeg && npm run build && electron-builder --linux AppImage --publish never && node scripts/place-meme-pack.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test": "node scripts/test.mjs",
     "test:vitest": "vitest run --coverage && node scripts/quality.mjs",
     "test:e2e": "electron-vite build --logLevel error && node scripts/run-headless-wayland.mjs node_modules/.bin/playwright test",
     "test:quality": "node scripts/quality.mjs",
-    "build:meme-pack": "node scripts/build-meme-pack.mjs"
+    "build:meme-pack": "node scripts/build-meme-pack.mjs",
+    "build:ffmpeg": "node scripts/build-ffmpeg.mjs"
   },
   "dependencies": {
     "@fontsource/anton": "5.2.7",
@@ -86,8 +88,8 @@
         "to": "resources/catcut-icon.png"
       },
       {
-        "from": "node_modules/ffmpeg-static/ffmpeg",
-        "to": "bin/ffmpeg"
+        "from": "dist/ffmpeg-vaapi",
+        "to": "bin"
       },
       {
         "from": "node_modules/ffprobe-static/bin/linux/x64/ffprobe",

@@ -22,14 +22,14 @@ jobs:
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: 22.22.1
-          cache: npm
+          package-manager-cache: false
 
       - name: Install GNOME Wayland runtime and dependencies
         run: |
           sudo apt-get update
           sudo apt-get install --yes gnome-shell libgbm1 libgtk-3-0 libnss3 libasound2t64
           npm install --global npm@11.18.0
-          npm ci
+          npm install
           npm audit --omit=dev --audit-level=high
 
       - name: Verify release
