@@ -1,15 +1,11 @@
-import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { mkdir, mkdtemp, rename, rm, statfs, writeFile } from 'node:fs/promises'
 import { dirname, extname, join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { promisify } from 'node:util'
 import type { ExportRequest, Overlay, TextOverlay, VisualOverlayBase } from '../types'
-import { ffmpegPath, ffprobePath } from './binaries'
 import { exportEncoders } from './export-encoder'
 import { jobs } from './jobs'
 
-const execFileAsync = promisify(execFile)
 type Encoder = Awaited<ReturnType<typeof exportEncoders>>[number]
 
 interface PreparedInput {
@@ -234,70 +230,6 @@ function addAudioFilters(filters: string[], inputs: PreparedInput[]): void {
   }
 }
 
-async function keyframes(path: string): Promise<number[]> {
-  const { stdout } = await execFileAsync(
-    ffprobePath(),
-    [
-      '-v', 'error',
-      '-select_streams', 'v:0',
-      '-skip_frame', 'nokey',
-      '-show_entries', 'frame=best_effort_timestamp_time',
-      '-of', 'csv=p=0',
-      path
-    ],
-    { maxBuffer: 32 * 1024 * 1024 }
-  )
-  return stdout.split(/\r?\n/).map(Number).filter(Number.isFinite)
-}
-
-function nearKeyframe(time: number, frames: number[], tolerance: number, duration: number): boolean {
-  if (time <= tolerance || Math.abs(duration - time) <= tolerance) return true
-  return frames.some((frame) => Math.abs(frame - time) <= tolerance)
-}
-
-function soleTimelineSource(request: ExportRequest): ExportRequest['sources'][number] | null {
-  const sourceId = request.segments[0]?.sourceId
-  if (!sourceId || request.segments.some((segment) => segment.sourceId !== sourceId)) return null
-  return request.sources.find((source) => source.id === sourceId) ?? null
-}
-
-function preservesSourceFormat(request: ExportRequest, source: ExportRequest['sources'][number]['metadata']): boolean {
-  return request.canvas.fit === 'contain'
-    && request.canvas.width === source.width
-    && request.canvas.height === source.height
-    && Math.abs(request.canvas.fps - source.fps) <= 0.01
-}
-
-function segmentsAreKeyframeSafe(request: ExportRequest, frames: number[], tolerance: number, duration: number): boolean {
-  return request.segments.every((segment) =>
-    nearKeyframe(segment.sourceStart, frames, tolerance, duration)
-    && nearKeyframe(segment.sourceEnd, frames, tolerance, duration)
-  )
-}
-
-function frameTolerance(fps: number): number {
-  return Math.max(0.05, fps > 0 ? 1 / fps : 0.05)
-}
-
-async function canStreamCopy(request: ExportRequest): Promise<boolean> {
-  if (requiresVideoEncoding(request)) return false
-  const timelineSource = soleTimelineSource(request)
-  if (!timelineSource) return false
-  const source = timelineSource.metadata
-  if (!['h264', 'hevc', 'av1', 'vp9'].includes(source.videoCodec)) return false
-  if (!preservesSourceFormat(request, source)) return false
-  const frames = await keyframes(source.path)
-  return segmentsAreKeyframeSafe(request, frames, frameTolerance(source.fps), source.duration)
-}
-
-function requiresVideoEncoding(request: ExportRequest): boolean {
-  return request.overlays.length > 0 || request.segments.some((segment) => segment.transition)
-}
-
-function concatPath(path: string): string {
-  return path.replaceAll("'", "'\\''")
-}
-
 async function ensureDiskSpace(request: ExportRequest): Promise<void> {
   const available = await statfs(dirname(request.outputPath))
   const free = available.bavail * available.bsize
@@ -336,52 +268,11 @@ async function writeExport(
   duration: number,
   jobId: string
 ): Promise<void> {
-  if (!await canStreamCopy(request)) {
-    await encodeVideo(request, directory, output, duration, jobId)
-    return
-  }
-  try {
-    await streamCopy(request, directory, output, duration, jobId)
-  } catch (error) {
-    if (isCancellation(error)) throw error
-    // A keyframe-safe remux can still fail on an incompatible container stream.
-    // Remove its partial output and use the normal encode path transparently.
-    await rm(output, { force: true })
-    await encodeVideo(request, directory, output, duration, jobId)
-  }
+  await encodeVideo(request, directory, output, duration, jobId)
 }
 
 function isCancellation(error: unknown): boolean {
   return error instanceof Error && error.message.toLowerCase().includes('cancelled')
-}
-
-async function streamCopy(
-  request: ExportRequest,
-  directory: string,
-  output: string,
-  duration: number,
-  jobId: string
-): Promise<void> {
-  const concatFile = join(directory, 'segments.ffconcat')
-  const lines = ['ffconcat version 1.0']
-  for (const segment of request.segments) {
-    const source = request.sources.find((candidate) => candidate.id === segment.sourceId)
-    if (!source) throw new Error('A timeline video source is missing')
-    lines.push(`file '${concatPath(source.metadata.path)}'`)
-    lines.push(`inpoint ${seconds(segment.sourceStart)}`)
-    lines.push(`outpoint ${seconds(segment.sourceEnd)}`)
-  }
-  await writeFile(concatFile, `${lines.join('\n')}\n`)
-  await jobs.run(ffmpegPath(), streamCopyArguments(concatFile, output), 'export', duration, request.outputPath, jobId)
-}
-
-export function streamCopyArguments(concatFile: string, output: string): string[] {
-  return [
-    '-hide_banner', '-y', '-f', 'concat', '-safe', '0', '-i', concatFile,
-    '-map', '0:v:0', '-map', '0:a:0?', '-sn', '-dn', '-c', 'copy',
-    '-avoid_negative_ts', 'make_zero', '-movflags', '+faststart',
-    '-progress', 'pipe:1', '-nostats', output
-  ]
 }
 
 async function prepareInputs(request: ExportRequest, directory: string): Promise<{

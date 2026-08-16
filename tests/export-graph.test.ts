@@ -5,10 +5,9 @@ vi.mock('../../src/main/binaries', () => ({ ffmpegPath: () => '/ffmpeg', ffprobe
 vi.mock('../../src/main/jobs', () => ({ jobs: { run: vi.fn() } }))
 
 let buildFilterGraph: typeof import('../src/main/exporter').buildFilterGraph
-let streamCopyArguments: typeof import('../src/main/exporter').streamCopyArguments
 
 beforeAll(async () => {
-  ;({ buildFilterGraph, streamCopyArguments } = await import('../src/main/exporter'))
+  ;({ buildFilterGraph } = await import('../src/main/exporter'))
 })
 
 describe('FFmpeg export graph', () => {
@@ -95,12 +94,6 @@ describe('FFmpeg export graph', () => {
     expect(graph.match(/colorchannelmixer=aa=0\.5/g)).toHaveLength(1)
     expect(graph).toContain('pad=640:360:(ow-iw)/2:(oh-ih)/2:color=black@0')
     expect(graph).toContain('overlay=x=320:y=180')
-  })
-
-  it('maps only MP4-compatible primary streams during lossless remuxing', () => {
-    const args = streamCopyArguments('/tmp/segments.ffconcat', '/tmp/output.mp4')
-    expect(args).toEqual(expect.arrayContaining(['0:v:0', '0:a:0?', '-sn', '-dn']))
-    expect(args.some((argument, index) => argument === '0' && args[index - 1] === '-map')).toBe(false)
   })
 
   it('normalizes multiple sources into a cropped 9:16 Short canvas', () => {
