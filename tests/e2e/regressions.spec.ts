@@ -451,7 +451,7 @@ test('restores normal-close state and Reset project forgets it', async () => {
   expect(await restored.evaluate(({ Menu }) => {
     const project = Menu.getApplicationMenu()?.items.find((item) => item.label === 'Project')
     return project?.submenu?.items.filter((item) => item.type !== 'separator').map((item) => item.label)
-  })).toEqual(['CatCut 0.2.2', 'Reset project'])
+  })).toEqual(['CatCut 0.2.3', 'Reset project'])
   await restoredWindow.evaluate(() => { window.confirm = () => true })
   await restored.evaluate(({ Menu }) => {
     const reset = Menu.getApplicationMenu()?.items
