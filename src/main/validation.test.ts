@@ -10,6 +10,7 @@ const metadata = {
 describe('IPC input validation', () => {
   it('accepts bounded media metadata and rejects invalid values', () => {
     expect(parseMediaMetadata(metadata)).toEqual(metadata)
+    expect(parseMediaMetadata({ ...metadata, size: 8 * 1024 * 1024 * 1024 }).size).toBe(8 * 1024 * 1024 * 1024)
     expect(() => parseMediaMetadata({ ...metadata, duration: Number.NaN })).toThrow('duration')
     expect(() => parseMediaMetadata({ ...metadata, width: -1 })).toThrow('width')
   })

@@ -70,7 +70,7 @@ export function parseMediaMetadata(value: unknown): MediaMetadata {
   return {
     path: parsePath(input.path),
     name: text(input.name, 'Media name', 1024),
-    size: number(input.size, 'Media size'),
+    size: number(input.size, 'Media size', 0, Number.MAX_SAFE_INTEGER),
     modifiedAt: number(input.modifiedAt, 'Modification time', 0, 1e14),
     duration: number(input.duration, 'Media duration', 0.001, 1e8),
     width: number(input.width, 'Media width', 1, 100_000),
