@@ -470,7 +470,9 @@ export const useEditorStore = create<EditorState>((set, get) => {
     get().session?.sources.forEach(loadWaveform)
   },
 
-  setJob(job) { set({ job }) },
+  setJob(job) {
+    if (job.kind === 'export') set({ job })
+  },
   showError(error) { set({ error }) },
   clearError() { set({ error: null }) },
   markExported() {

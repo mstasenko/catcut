@@ -261,6 +261,8 @@ describe('editor store', () => {
   it('updates status helpers', async () => {
     useEditorStore.getState().setJob({ id: 'j', kind: 'export', state: 'running', progress: 0.5, message: '50%' })
     expect(useEditorStore.getState().job?.progress).toBe(0.5)
+    useEditorStore.getState().setJob({ id: 'proxy', kind: 'proxy', state: 'running', progress: 0.25, message: '25%' })
+    expect(useEditorStore.getState().job).toMatchObject({ id: 'j', progress: 0.5 })
     useEditorStore.setState({ error: 'oops' })
     useEditorStore.getState().clearError()
     expect(useEditorStore.getState().error).toBeNull()
