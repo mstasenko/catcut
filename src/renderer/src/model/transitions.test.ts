@@ -32,7 +32,7 @@ describe('timeline transitions', () => {
         }
       }],
       segments,
-      overlays: [], selectedOverlayId: null, playhead: 2.5, cutPoints: [], dirty: true
+      overlays: [], focusZooms: [], selectedOverlayId: null, playhead: 2.5, cutPoints: [], dirty: true
     } satisfies EditSession
     expect(transitionPreviewAtOutputTime(session, 2.5)).toMatchObject({
       previousPath: 'catcut:/source.mp4', previousFrameTime: 1.95,

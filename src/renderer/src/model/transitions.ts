@@ -1,6 +1,6 @@
 import type { CSSProperties } from 'react'
 import type { EditSession, SourceSegment, TransitionEffect, VideoTransition } from '@shared/types'
-import { clamp, positionAtOutputTime, sourceForSegment } from './timeline'
+import { clamp, isFreezeSegment, positionAtOutputTime, sourceForSegment } from './timeline'
 
 export interface ActiveTransition extends VideoTransition {
   currentSegmentIndex: number
@@ -26,8 +26,10 @@ export function transitionAtOutputTime(
   outputTime: number
 ): ActiveTransition | null {
   const position = positionAtOutputTime(segments, outputTime)
-  const transition = position?.segment.transition
-  if (!position || position.segmentIndex === 0 || !transition) return null
+  const previous = position ? segments[position.segmentIndex - 1] : undefined
+  if (!position || position.segmentIndex === 0 || isFreezeSegment(position.segment) || !previous || isFreezeSegment(previous)) return null
+  const transition = position.segment.transition
+  if (!transition) return null
   const elapsed = outputTime - position.outputStart
   if (elapsed < 0 || elapsed >= transition.duration) return null
   return {
@@ -94,7 +96,7 @@ export function transitionPreviewAtOutputTime(
   const active = transitionAtOutputTime(session.segments, outputTime)
   if (!active) return null
   const previous = session.segments[active.previousSegmentIndex]
-  if (!previous) return null
+  if (!previous || isFreezeSegment(previous)) return null
   const source = sourceForSegment(session, previous)
   if (!source) return null
   return {

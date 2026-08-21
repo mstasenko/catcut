@@ -29,11 +29,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes gnome-shell libgbm1 libgtk-3-0 libnss3 libasound2t64
           npm install --global npm@11.18.0
-          npm install
-          npm audit --omit=dev --audit-level=high
 
       - name: Verify release
-        run: npm test
+        run: npm run verify:ci
 
       - name: Build release files
         run: |

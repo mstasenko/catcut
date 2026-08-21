@@ -36,19 +36,57 @@ export interface VideoTransition {
   duration: number
 }
 
+export const videoSpeeds = [0.25, 0.5, 1, 2, 4] as const
+export const focusZoomAmounts = [1.5, 2, 3, 4, 5, 6, 7, 8, 9, 10] as const
+export const freezeDurations = [0.5, 1, 2] as const
+export const textAnimationPresets = ['none', 'pop', 'fade', 'bounce', 'shake'] as const
+export const audioFadeDurations = [0, 0.1, 0.25, 0.5, 1] as const
+export const gameAudioLevels = [0.5, 0.3, 0.15] as const
+export type VideoSpeed = typeof videoSpeeds[number]
+export type FocusZoomAmount = typeof focusZoomAmounts[number]
+export type FreezeDuration = typeof freezeDurations[number]
+export type TextAnimationPreset = typeof textAnimationPresets[number]
+export type AudioFadeDuration = typeof audioFadeDurations[number]
+export type GameAudioLevel = typeof gameAudioLevels[number]
+
+export interface FocusZoomEffect {
+  id: string
+  start: number
+  duration: number
+  zoom: FocusZoomAmount
+  focusX: number
+  focusY: number
+}
+
 export interface InsertTransitions {
   into?: VideoTransition
   back?: VideoTransition
 }
 
-export interface SourceSegment {
+export interface VideoSegment {
+  kind?: 'video'
   id: string
   sourceId: string
   sourceStart: number
   sourceEnd: number
+  /** Playback speed for this segment; omitted means normal speed. */
+  playbackRate?: VideoSpeed
   /** Transition from the preceding segment into this segment. */
   transition?: VideoTransition
+  /** Ordinary timeline segments copied by one Replay action share this ID. */
+  replayGroupId?: string
 }
+
+export interface FreezeSegment {
+  kind: 'freeze'
+  id: string
+  sourceId: string
+  sourceTime: number
+  duration: number
+  replayGroupId?: string
+}
+
+export type SourceSegment = VideoSegment | FreezeSegment
 
 export interface ExportSource {
   id: string
@@ -94,7 +132,19 @@ export interface TextOverlay extends VisualOverlayBase {
   outlineWidth: number
   shadow: boolean
   align: 'left' | 'center' | 'right'
+  animation?: TextAnimationPreset
   renderedImageDataUrl?: string
+  renderedTextBitmap?: RenderedTextBitmap
+}
+
+export interface RenderedTextBitmap {
+  dataUrl: string
+  x: number
+  y: number
+  width: number
+  height: number
+  anchorX: number
+  anchorY: number
 }
 
 export interface ImageOverlay extends VisualOverlayBase {
@@ -113,21 +163,27 @@ export interface GifOverlay extends VisualOverlayBase {
   sourceDuration: number
 }
 
-export interface VideoOverlay extends VisualOverlayBase {
+export interface AudioOverlaySettings {
+  volume: number
+  fadeIn?: AudioFadeDuration
+  fadeOut?: AudioFadeDuration
+  duckGameAudio?: boolean
+  gameAudioLevel?: GameAudioLevel
+}
+
+export interface VideoOverlay extends VisualOverlayBase, AudioOverlaySettings {
   type: 'video'
   path: string
   loop: boolean
   audioEnabled: boolean
   hasAudio: boolean
-  volume: number
   sourceIn: number
   sourceDuration: number
 }
 
-export interface AudioOverlay extends OverlayBase {
+export interface AudioOverlay extends OverlayBase, AudioOverlaySettings {
   type: 'audio'
   path: string
-  volume: number
   sourceIn: number
   sourceDuration: number
 }
@@ -143,6 +199,7 @@ export interface EditSession {
   playhead: number
   cutPoints: number[]
   dirty: boolean
+  focusZooms: FocusZoomEffect[]
 }
 
 export interface ExportRequest {
@@ -151,6 +208,7 @@ export interface ExportRequest {
   outputPath: string
   segments: SourceSegment[]
   overlays: Overlay[]
+  focusZooms?: FocusZoomEffect[]
 }
 
 export interface SavedSessionSnapshot {
@@ -162,6 +220,7 @@ export interface SavedSessionSnapshot {
   playhead: number
   cutPoints: number[]
   dirty: boolean
+  focusZooms?: FocusZoomEffect[]
 }
 
 export interface SavedSession extends SavedSessionSnapshot {

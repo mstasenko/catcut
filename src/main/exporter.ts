@@ -2,9 +2,12 @@ import { randomUUID } from 'node:crypto'
 import { mkdir, mkdtemp, rename, rm, statfs, writeFile } from 'node:fs/promises'
 import { dirname, extname, join } from 'node:path'
 import { tmpdir } from 'node:os'
-import type { ExportRequest, Overlay, TextOverlay, VisualOverlayBase } from '../types'
+import type { ExportRequest, Overlay, SourceSegment, TextOverlay, VisualOverlayBase } from '../types'
 import { exportEncoders } from './export-encoder'
 import { jobs } from './jobs'
+import { addTextOverlayFilters } from './text-filters'
+import { addAudioOverlayFilters } from './audio-filters'
+import { segmentOutputDuration, segmentPlaybackRate } from '../segment-time'
 
 type Encoder = Awaited<ReturnType<typeof exportEncoders>>[number]
 
@@ -17,15 +20,44 @@ function seconds(value: number): string {
   return Math.max(0, value).toFixed(6)
 }
 
+function focusZoomExpression(request: ExportRequest): { zoom: string; x: string; y: string } | null {
+  const effects = request.focusZooms ?? []
+  if (effects.length === 0) return null
+  const time = `on/${request.canvas.fps}`
+  let zoom = '1'
+  let x = '0'
+  let y = '0'
+  for (const effect of [...effects].reverse()) {
+    const end = effect.start + effect.duration
+    const ramp = Math.min(0.18, effect.duration / 3)
+    const local = `((${time})-${seconds(effect.start)})`
+    const easedIn = `pow(min(1,max(0,${local}/${seconds(ramp)})),2)*(3-2*min(1,max(0,${local}/${seconds(ramp)})))`
+    const easedOut = `pow(min(1,max(0,(${seconds(end)}-(${time}))/${seconds(ramp)})),2)*(3-2*min(1,max(0,(${seconds(end)}-(${time}))/${seconds(ramp)})))`
+    const activeZoom = `(1+${effect.zoom - 1}*min(${easedIn},${easedOut}))`
+    const active = `between(${time},${seconds(effect.start)},${seconds(end)})`
+    zoom = `if(${active},${activeZoom},${zoom})`
+    x = `if(${active},max(0,min(iw-iw/zoom,${effect.focusX}*iw-iw/(2*zoom))),${x})`
+    y = `if(${active},max(0,min(ih-ih/zoom,${effect.focusY}*ih-ih/(2*zoom))),${y})`
+  }
+  return { zoom, x, y }
+}
+
+function audioTempoFilter(rate: number): string {
+  if (rate === 1) return 'anull'
+  const factors = rate === 0.25 ? [0.5, 0.5] : rate === 4 ? [2, 2] : [rate]
+  return factors.map((factor) => `atempo=${factor}`).join(',')
+}
+
 async function prepareRenderedImage(
-  overlay: Pick<TextOverlay, 'id' | 'name' | 'renderedImageDataUrl'>,
+  overlay: Pick<TextOverlay, 'id' | 'name' | 'renderedImageDataUrl' | 'renderedTextBitmap'>,
   directory: string
 ): Promise<string> {
-  if (!overlay.renderedImageDataUrl?.startsWith('data:image/png;base64,')) {
+  const dataUrl = overlay.renderedTextBitmap?.dataUrl ?? overlay.renderedImageDataUrl
+  if (!dataUrl?.startsWith('data:image/png;base64,')) {
     throw new Error(`Overlay “${overlay.name}” was not rendered before export`)
   }
   const path = join(directory, `${overlay.id}.png`)
-  const encoded = overlay.renderedImageDataUrl.slice('data:image/png;base64,'.length)
+  const encoded = dataUrl.slice('data:image/png;base64,'.length)
   await writeFile(path, Buffer.from(encoded, 'base64'))
   return path
 }
@@ -59,9 +91,19 @@ export function buildFilterGraph(request: ExportRequest, inputs: PreparedInput[]
   const filters: string[] = []
   const { videoSegments, audioSegments } = addSegmentFilters(filters, request)
   addBaseFilters(filters, videoSegments, audioSegments, request)
-  const videoLabel = addVisualFilters(filters, inputs, request)
-  addAudioFilters(filters, inputs)
+  const cameraLabel = addFocusZoomFilters(filters, request)
+  const videoLabel = addVisualFilters(filters, inputs, request, cameraLabel)
+  const duration = request.segments.reduce((sum, segment) => sum + segmentOutputDuration(segment), 0)
+  addAudioOverlayFilters(filters, inputs, duration)
   return { graph: filters.join(';'), videoLabel, audioLabel: 'aout' }
+}
+
+function addFocusZoomFilters(filters: string[], request: ExportRequest): string {
+  const expression = focusZoomExpression(request)
+  if (!expression) return 'basev'
+  const { width, height, fps } = request.canvas
+  filters.push(`[basev]zoompan=z='${expression.zoom}':x='${expression.x}':y='${expression.y}':d=1:s=${width}x${height}:fps=${fps}[camera]`)
+  return 'camera'
 }
 
 function addSegmentFilters(filters: string[], request: ExportRequest): {
@@ -70,32 +112,51 @@ function addSegmentFilters(filters: string[], request: ExportRequest): {
 } {
   const videoSegments: string[] = []
   const audioSegments: string[] = []
-  request.segments.forEach((segment, index) => {
-    const inputIndex = request.sources.findIndex((source) => source.id === segment.sourceId)
-    const source = request.sources[inputIndex]?.metadata
-    if (inputIndex < 0 || !source) throw new Error('A timeline video source is missing')
-    const segmentDuration = segment.sourceEnd - segment.sourceStart
-    const { width, height, fps, fit } = request.canvas
-    // FFmpeg concat requires every clip to have matching video and audio formats.
-    const scaleAndCrop = fit === 'cover'
-      ? `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}`
-      : `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black`
+  request.segments.forEach((segment, index) => addSegmentFilter(filters, request, segment, index, videoSegments, audioSegments))
+  return { videoSegments, audioSegments }
+}
+
+function addSegmentFilter(filters: string[], request: ExportRequest, segment: SourceSegment, index: number, videoSegments: string[], audioSegments: string[]): void {
+    const { inputIndex, source } = exportSegmentSource(request, segment)
+    const playbackRate = segmentPlaybackRate(segment)
+    const segmentDuration = segmentOutputDuration(segment)
+    const { fps } = request.canvas
+    const scaleAndCrop = exportScaleAndCrop(request)
+    if (segment.kind === 'freeze') {
+      filters.push(`[${inputIndex}:v:0]trim=start=${seconds(segment.sourceTime)},setpts=PTS-STARTPTS,select='eq(n,0)',tpad=stop_mode=clone:stop_duration=${seconds(segment.duration)},trim=duration=${seconds(segment.duration)},${scaleAndCrop},setsar=1,fps=${fps},settb=AVTB,format=yuv420p[vseg${index}]`)
+      filters.push(`anullsrc=channel_layout=stereo:sample_rate=48000:d=${seconds(segment.duration)}[aseg${index}]`)
+      videoSegments.push(`[vseg${index}]`)
+      audioSegments.push(`[aseg${index}]`)
+      return
+    }
     filters.push(
       `[${inputIndex}:v:0]trim=start=${seconds(segment.sourceStart)}:end=${seconds(segment.sourceEnd)},` +
-      `setpts=PTS-STARTPTS,${scaleAndCrop},setsar=1,fps=${fps},settb=AVTB,format=yuv420p[vseg${index}]`
+      `setpts=(PTS-STARTPTS)/${playbackRate},${scaleAndCrop},setsar=1,fps=${fps},settb=AVTB,format=yuv420p[vseg${index}]`
     )
     videoSegments.push(`[vseg${index}]`)
     if (source.hasAudio) {
       filters.push(
         `[${inputIndex}:a:0]atrim=start=${seconds(segment.sourceStart)}:end=${seconds(segment.sourceEnd)},` +
-        `asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[aseg${index}]`
+        `asetpts=PTS-STARTPTS,${audioTempoFilter(playbackRate)},aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[aseg${index}]`
       )
     } else {
       filters.push(`anullsrc=channel_layout=stereo:sample_rate=48000:d=${seconds(segmentDuration)}[aseg${index}]`)
     }
     audioSegments.push(`[aseg${index}]`)
-  })
-  return { videoSegments, audioSegments }
+}
+
+function exportSegmentSource(request: ExportRequest, segment: SourceSegment): { inputIndex: number; source: ExportRequest['sources'][number]['metadata'] } {
+  const inputIndex = request.sources.findIndex((source) => source.id === segment.sourceId)
+  const source = request.sources[inputIndex]?.metadata
+  if (inputIndex < 0 || !source) throw new Error('A timeline video source is missing')
+  return { inputIndex, source }
+}
+
+function exportScaleAndCrop(request: ExportRequest): string {
+  const { width, height, fit } = request.canvas
+  return fit === 'cover'
+    ? `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}`
+    : `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black`
 }
 
 function addBaseFilters(
@@ -119,13 +180,13 @@ function addVideoBaseFilters(
 ): void {
   let currentLabel = required(videoSegments[0], 'The timeline is empty')
   const firstSegment = required(request.segments[0], 'The timeline is empty')
-  let outputDuration = firstSegment.sourceEnd - firstSegment.sourceStart
+  let outputDuration = segmentOutputDuration(firstSegment)
 
   for (let index = 1; index < request.segments.length; index += 1) {
     const segment = required(request.segments[index], 'A timeline video segment is missing')
     const nextLabel = required(videoSegments[index], 'A timeline video segment is missing')
     const joinedLabel = `[vjoin${index}]`
-    if (segment.transition) {
+    if (segment.kind !== 'freeze' && segment.transition) {
       const heldLabel = `[vhold${index}]`
       filters.push(
         `${currentLabel}tpad=stop_mode=clone:stop_duration=${seconds(segment.transition.duration)}${heldLabel}`,
@@ -136,7 +197,7 @@ function addVideoBaseFilters(
       filters.push(`${currentLabel}${nextLabel}concat=n=2:v=1:a=0${joinedLabel}`)
     }
     currentLabel = joinedLabel
-    outputDuration += segment.sourceEnd - segment.sourceStart
+    outputDuration += segmentOutputDuration(segment)
   }
   filters.push(`${currentLabel}null[basev]`)
 }
@@ -156,13 +217,7 @@ function visualFilter(
 ): string {
   const outputLabel = `vout${order}`
   if (overlay.type === 'text') {
-    filters.push(
-      `[${index}:v:0]trim=duration=${seconds(overlay.duration)},` +
-      `setpts=PTS-STARTPTS+${seconds(overlay.start)}/TB,format=rgba,colorchannelmixer=aa=${overlay.opacity}[ov${order}]`,
-      `[${inputLabel}][ov${order}]overlay=x=0:y=0:eof_action=pass:repeatlast=1:` +
-      `enable='between(t,${seconds(overlay.start)},${seconds(overlay.start + overlay.duration)})'[${outputLabel}]`
-    )
-    return outputLabel
+    return addTextOverlayFilters(filters, overlay, index, order, inputLabel, request.canvas)
   }
   const { canvas } = request
   const geometry = visualGeometry(overlay, canvas.width, canvas.height)
@@ -195,8 +250,8 @@ function visualScale(fullScreen: boolean, geometry: ReturnType<typeof visualGeom
     `format=rgba,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black@0`
 }
 
-function addVisualFilters(filters: string[], inputs: PreparedInput[], request: ExportRequest): string {
-  let videoLabel = 'basev'
+function addVisualFilters(filters: string[], inputs: PreparedInput[], request: ExportRequest, inputLabel = 'basev'): string {
+  let videoLabel = inputLabel
   const visualInputs = inputs
     .filter(({ overlay }) => overlay.type !== 'audio')
     .sort((left, right) => left.overlay.zIndex - right.overlay.zIndex)
@@ -205,29 +260,6 @@ function addVisualFilters(filters: string[], inputs: PreparedInput[], request: E
     videoLabel = visualFilter(filters, overlay, index, order, videoLabel, request)
   })
   return videoLabel
-}
-
-function addAudioFilters(filters: string[], inputs: PreparedInput[]): void {
-  const audioInputs = inputs.filter(({ overlay }) =>
-    overlay.type === 'audio' || (overlay.type === 'video' && overlay.audioEnabled)
-  )
-  const audioLabels = ['[basea]']
-  audioInputs.forEach(({ overlay, index }, order) => {
-    const delay = Math.round(overlay.start * 1000)
-    const volume = overlay.type === 'audio' || overlay.type === 'video' ? overlay.volume : 1
-    const sourceIn = overlay.type === 'audio' || overlay.type === 'video' ? overlay.sourceIn : 0
-    filters.push(
-      `[${index}:a:0]atrim=start=${seconds(sourceIn)}:end=${seconds(sourceIn + overlay.duration)},asetpts=PTS-STARTPTS,` +
-      `volume=${volume},adelay=${delay}|${delay}[aov${order}]`
-    )
-    audioLabels.push(`[aov${order}]`)
-  })
-
-  if (audioLabels.length > 1) {
-    filters.push(`${audioLabels.join('')}amix=inputs=${audioLabels.length}:duration=longest:normalize=0,alimiter=limit=0.95[aout]`)
-  } else {
-    filters.push('[basea]alimiter=limit=0.95[aout]')
-  }
 }
 
 async function ensureDiskSpace(request: ExportRequest): Promise<void> {
@@ -246,7 +278,7 @@ export async function exportVideo(request: ExportRequest): Promise<{ jobId: stri
   await ensureDiskSpace(request)
   const temporaryDirectory = await mkdtemp(join(tmpdir(), 'catcut-export-'))
   const temporaryOutput = join(dirname(request.outputPath), `.${randomUUID()}.catcut.mp4`)
-  const duration = request.segments.reduce((sum, segment) => sum + segment.sourceEnd - segment.sourceStart, 0)
+  const duration = request.segments.reduce((sum, segment) => sum + segmentOutputDuration(segment), 0)
   const jobId = randomUUID()
 
   try {

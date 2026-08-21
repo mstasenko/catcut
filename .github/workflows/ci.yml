@@ -33,13 +33,10 @@ jobs:
           sudo apt-get install --yes gnome-shell libgbm1 libgtk-3-0 libnss3 libasound2t64
 
       - name: Install dependencies
-        run: |
-          npm install --global npm@11.18.0
-          npm install
-          npm audit --omit=dev --audit-level=high
+        run: npm install --global npm@11.18.0
 
       - name: Check quality and test all functionality
-        run: npm test
+        run: npm run verify:ci
 
       - name: Build AppImage
         run: npm run package

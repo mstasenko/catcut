@@ -1,154 +1,35 @@
 import { create } from 'zustand'
-import type {
-  AssetItem,
-  EditSession,
-  GpuDiagnostics,
-  InsertTransitions,
-  JobProgress,
-  Overlay,
-  SavedSession,
-  SavedSessionSnapshot,
-  TimelineSource,
-  VideoOverlay
-} from '@shared/types'
+import type { EditSession, Overlay, TimelineSource, VideoOverlay } from '@shared/types'
+import type { EditorState } from './editor-state'
 import {
   clamp,
   createSession,
   cutPointsAfterRemoval,
   defaultTextOverlay,
   deletionRange,
-  insertSourceAtOutputTime,
   makeId,
   primarySource,
   removeOutputRange,
-  timelineDuration
+  timelineDuration,
+  positionAtOutputTime,
+  isFreezeSegment
 } from './timeline'
+import { insertSourceAtOutputTime } from './segment-ranges'
+import { applySpeedToOutputRange } from './speed'
+import { addFocusZoom, removeFocusZoomFromRange } from './focus-zoom'
+import { insertFreezeFrame, removeFreezeFrame } from './freeze'
+import { timedRangesAfterRemoval } from './timed-ranges'
+import { insertReplay as insertReplayEdit, removeReplayAtPlayhead, replayEligibility } from './replay'
+import {
+  cloneSession,
+  mutation,
+  patchedOverlaySession,
+  restoredEditorState
+} from './store-session'
 
-export interface EditorState {
-  initialized: boolean
-  session: EditSession | null
-  history: EditSession[]
-  future: EditSession[]
-  gesture: EditSession | null
-  assets: AssetItem[]
-  gpu: GpuDiagnostics | null
-  job: JobProgress | null
-  busy: string | null
-  error: string | null
-  initialize: () => Promise<void>
-  loadVideo: (path?: string, short?: boolean) => Promise<void>
-  openShort: () => Promise<void>
-  insertVideo: (transitions?: InsertTransitions) => Promise<void>
-  resetProject: () => Promise<void>
-  setPlayhead: (time: number) => void
-  setPlaybackPath: (path: string) => Promise<void>
-  selectPoint: () => void
-  clearSelection: () => void
-  deleteSelection: () => void
-  addText: () => void
-  addAsset: (asset: AssetItem) => Promise<void>
-  addExternalMedia: () => Promise<void>
-  selectOverlay: (id: string | null) => void
-  updateOverlay: (id: string, patch: Partial<Overlay>) => void
-  beginOverlayGesture: () => void
-  updateOverlayGesture: (id: string, patch: Partial<Overlay>) => void
-  commitOverlayGesture: () => void
-  cancelOverlayGesture: () => void
-  removeSelectedOverlay: () => void
-  undo: () => void
-  redo: () => void
-  setJob: (progress: JobProgress) => void
-  showError: (message: string) => void
-  clearError: () => void
-  markExported: () => void
-}
+export type { EditorState } from './editor-state'
 
-function cloneSession(session: EditSession): EditSession {
-  return structuredClone(session)
-}
-
-function mutation(
-  state: EditorState,
-  update: (session: EditSession) => EditSession
-): Partial<EditorState> {
-  if (!state.session) return {}
-  const previous = cloneSession(state.session)
-  const next = update(cloneSession(state.session))
-  next.dirty = true
-  return {
-    session: next,
-    history: [...state.history.slice(-49), previous],
-    future: []
-  }
-}
-
-function patchedOverlaySession(session: EditSession, id: string, patch: Partial<Overlay>): EditSession {
-  return {
-    ...session,
-    dirty: true,
-    overlays: session.overlays.map((overlay) =>
-      overlay.id === id ? ({ ...overlay, ...patch } as Overlay) : overlay
-    )
-  }
-}
-
-function savedSnapshot(session: EditSession): SavedSessionSnapshot {
-  return {
-    canvas: session.canvas,
-    sources: session.sources.map(({ id, metadata }) => ({ id, metadata })),
-    segments: session.segments,
-    overlays: session.overlays,
-    selectedOverlayId: session.selectedOverlayId,
-    playhead: session.playhead,
-    cutPoints: session.cutPoints,
-    dirty: session.dirty
-  }
-}
-
-export function savedSession(
-  session: EditSession,
-  history: EditSession[] = [],
-  future: EditSession[] = []
-): SavedSession {
-  return {
-    ...savedSnapshot(session),
-    history: history.slice(-50).map(savedSnapshot),
-    future: future.slice(0, 50).map(savedSnapshot)
-  }
-}
-
-async function restoredSession(
-  saved: SavedSessionSnapshot,
-  pathUrl: (path: string) => Promise<string>
-): Promise<EditSession> {
-  const sources = await Promise.all(saved.sources.map(async (source) => ({
-    ...source,
-    playbackPath: await pathUrl(source.metadata.path),
-    waveform: []
-  })))
-  return { ...saved, sources }
-}
-
-async function restoredEditorState(saved: SavedSession): Promise<{
-  session: EditSession
-  history: EditSession[]
-  future: EditSession[]
-}> {
-  const urls = new Map<string, Promise<string>>()
-  const pathUrl = (path: string): Promise<string> => {
-    const existing = urls.get(path)
-    if (existing) return existing
-    const pending = window.catcut.getPathUrl(path)
-    urls.set(path, pending)
-    return pending
-  }
-  const [session, history, future] = await Promise.all([
-    restoredSession(saved, pathUrl),
-    Promise.all((saved.history ?? []).map((snapshot) => restoredSession(snapshot, pathUrl))),
-    Promise.all((saved.future ?? []).map((snapshot) => restoredSession(snapshot, pathUrl)))
-  ])
-  return { session, history, future }
-}
+export { savedSession } from './store-session'
 
 export const useEditorStore = create<EditorState>((set, get) => {
   const patchSource = (id: string, patch: Partial<TimelineSource>): void => set((state) => state.session ? {
@@ -207,7 +88,6 @@ export const useEditorStore = create<EditorState>((set, get) => {
       set({ initialized: true, error: 'CatCut could not finish starting. Close it and try again.' })
     }
   },
-
   async loadVideo(providedPath, short = false) {
     try {
       const path = providedPath ?? await window.catcut.openVideo()
@@ -229,11 +109,9 @@ export const useEditorStore = create<EditorState>((set, get) => {
       set({ busy: null, error: 'CatCut could not open this video. Try another file.' })
     }
   },
-
   async openShort() {
     await get().loadVideo(undefined, true)
   },
-
   async insertVideo(transitions = {}) {
     const path = await window.catcut.openVideo()
     if (!path || !get().session) return
@@ -263,12 +141,10 @@ export const useEditorStore = create<EditorState>((set, get) => {
       set({ busy: null, error: 'CatCut could not insert this video. Try another file.' })
     }
   },
-
   async resetProject() {
     await window.catcut.resetSession()
     set({ session: null, history: [], future: [], gesture: null, job: null, busy: null, error: null })
   },
-
   setPlayhead(time) {
     set((state) => {
       if (!state.session) return state
@@ -276,7 +152,6 @@ export const useEditorStore = create<EditorState>((set, get) => {
       return { session: { ...state.session, playhead: clamp(time, 0, duration) } }
     })
   },
-
   async setPlaybackPath(path) {
     const url = await window.catcut.getPathUrl(path)
     set((state) => state.session ? {
@@ -286,7 +161,6 @@ export const useEditorStore = create<EditorState>((set, get) => {
       }
     } : state)
   },
-
   selectPoint() {
     set((state) => {
       if (!state.session) return state
@@ -300,16 +174,19 @@ export const useEditorStore = create<EditorState>((set, get) => {
       }))
     })
   },
-
   clearSelection() {
     set((state) => mutation(state, (session) => ({ ...session, cutPoints: [] })))
   },
-
   deleteSelection() {
     set((state) => {
       if (!state.session) return state
       const range = deletionRange(state.session)
-      if (!range) return state
+      if (!range) {
+        const position = positionAtOutputTime(state.session.segments, state.session.playhead)
+        return position && isFreezeSegment(position.segment)
+          ? mutation(state, (session) => removeFreezeFrame(session, position.segment.id))
+          : state
+      }
       return mutation(state, (session) => {
         const [start, end] = range
         const result = removeOutputRange(session.segments, session.overlays, start, end)
@@ -319,6 +196,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
           ...result,
           playhead: Math.min(start, duration),
           cutPoints: cutPointsAfterRemoval(session.cutPoints, start, end, duration),
+          focusZooms: timedRangesAfterRemoval(session.focusZooms, start, end),
           selectedOverlayId: result.overlays.some((item) => item.id === session.selectedOverlayId)
             ? session.selectedOverlayId
             : null
@@ -326,14 +204,64 @@ export const useEditorStore = create<EditorState>((set, get) => {
       })
     })
   },
-
+  setSpeed(rate) {
+    set((state) => {
+      if (!state.session) return state
+      const range = deletionRange(state.session)
+      if (!range || range[1] - range[0] <= 0.0001) return state
+      return mutation(state, (session) => applySpeedToOutputRange(session, range[0], range[1], rate))
+    })
+  },
+  addFocusZoom(zoom, focusX, focusY) {
+    set((state) => {
+      if (!state.session) return state
+      const range = deletionRange(state.session)
+      if (!range) return state
+      return mutation(state, (session) => addFocusZoom(session, range[0], range[1], zoom, focusX, focusY))
+    })
+  },
+  removeFocusZoom() {
+    set((state) => {
+      if (!state.session) return state
+      const range = deletionRange(state.session)
+      return range ? mutation(state, (session) => removeFocusZoomFromRange(session, range[0], range[1])) : state
+    })
+  },
+  insertFreeze(duration) {
+    set((state) => mutation(state, (session) => insertFreezeFrame(session, session.playhead, duration)))
+  },
+  removeFreeze() {
+    set((state) => {
+      if (!state.session) return state
+      const position = positionAtOutputTime(state.session.segments, state.session.playhead)
+      if (!position || !isFreezeSegment(position.segment)) return state
+      return mutation(state, (session) => removeFreezeFrame(session, position.segment.id))
+    })
+  },
+  insertReplay() {
+    set((state) => {
+      if (!state.session) return state
+      const eligibility = replayEligibility(state.session)
+      if (!eligibility.range) return state
+      const [start, end] = eligibility.range
+      return mutation(state, (session) => insertReplayEdit(session, start, end))
+    })
+  },
+  removeReplay() {
+    set((state) => {
+      if (!state.session || !replayEligibility(state.session).removableGroupId) return state
+      return mutation(state, removeReplayAtPlayhead)
+    })
+  },
+  setTextAnimation(id, preset) {
+    set((state) => mutation(state, (session) => patchedOverlaySession(session, id, { animation: preset } as Partial<Overlay>)))
+  },
   addText() {
     set((state) => mutation(state, (session) => {
       const overlay = defaultTextOverlay(session.playhead, session.overlays.length + 1)
       return { ...session, overlays: [...session.overlays, overlay], selectedOverlayId: overlay.id }
     }))
   },
-
   async addAsset(asset) {
     const session = get().session
     if (!session) return
@@ -381,7 +309,6 @@ export const useEditorStore = create<EditorState>((set, get) => {
       set({ error: 'CatCut could not add this item. Try another file.' })
     }
   },
-
   async addExternalMedia() {
     const selection = await window.catcut.openMedia()
     if (!selection) return
@@ -393,27 +320,22 @@ export const useEditorStore = create<EditorState>((set, get) => {
       source: 'external'
     })
   },
-
   selectOverlay(id) {
     set((state) => state.session ? { session: { ...state.session, selectedOverlayId: id } } : state)
   },
-
   updateOverlay(id, patch) {
     set((state) => mutation(state, (session) => patchedOverlaySession(session, id, patch)))
   },
-
   beginOverlayGesture() {
     set((state) => state.session && !state.gesture
       ? { gesture: cloneSession(state.session) }
       : state)
   },
-
   updateOverlayGesture(id, patch) {
     set((state) => state.session
       ? { session: patchedOverlaySession(state.session, id, patch) }
       : state)
   },
-
   commitOverlayGesture() {
     set((state) => {
       if (!state.gesture || !state.session) return state

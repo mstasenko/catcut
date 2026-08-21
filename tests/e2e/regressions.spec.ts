@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { click, dismissHardwareWarningIfNeeded, e2eEnvironment, ffmpeg, ffprobe, hover, main, wheel } from './support'
+import { click, dismissHardwareWarningIfNeeded, e2eEnvironment, ffmpeg, ffprobe, hover, main, seekTimeline, syntheticVideo, wheel } from './support'
 const applications: ElectronApplication[] = []
 const temporaryDirectories: string[] = []
 
@@ -35,17 +35,6 @@ test.afterEach(async () => {
   for (const directory of temporaryDirectories.splice(0)) rmSync(directory, { recursive: true, force: true })
 })
 
-function makeVideo(directory: string): string {
-  const input = join(directory, 'black.mp4')
-  execFileSync(ffmpeg, [
-    '-hide_banner', '-loglevel', 'error', '-y',
-    '-f', 'lavfi', '-i', 'color=black:size=320x180:rate=24:duration=6',
-    '-f', 'lavfi', '-i', 'sine=frequency=440:duration=6',
-    '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', input
-  ])
-  return input
-}
-
 function probe(path: string): { format: { duration: string }; streams: { codec_type: string; width?: number; height?: number }[] } {
   const result: unknown = JSON.parse(execFileSync(ffprobe, [
     '-v', 'error', '-show_format', '-show_streams', '-of', 'json', path
@@ -53,21 +42,14 @@ function probe(path: string): { format: { duration: string }; streams: { codec_t
   return result as { format: { duration: string }; streams: { codec_type: string; width?: number; height?: number }[] }
 }
 
-async function seek(window: import('@playwright/test').Page, fraction: number): Promise<void> {
-  const timeline = window.locator('.timeline')
-  const box = await timeline.boundingBox()
-  if (!box) throw new Error('Timeline is not visible')
-  await click(timeline, { position: { x: box.width * fraction, y: box.height / 2 } })
-}
-
 test('plays from the point selected on the timeline', async () => {
   const directory = temporaryDirectory('catcut-seek-')
-  const input = makeVideo(directory)
+  const input = syntheticVideo(directory, true)
   const app = await launch(input)
   const window = await app.firstWindow()
-  const preview = window.locator('.preview-stage > video')
+  const preview = window.locator('.camera-layer > video:not(.preview-transition-previous)')
   await expect.poll(() => preview.evaluate((video) => (video as HTMLVideoElement).readyState)).toBeGreaterThanOrEqual(2)
-  await seek(window, 0.5)
+  await seekTimeline(window, 0.5)
   await click(window.getByRole('button', { name: 'Cut point', exact: true }))
   await click(window.getByRole('button', { name: 'Play', exact: true }))
   await expect.poll(() => preview.evaluate((video) => (video as HTMLVideoElement).currentTime)).toBeGreaterThan(3)
@@ -75,12 +57,12 @@ test('plays from the point selected on the timeline', async () => {
 
 test('moves five seconds with arrow keys while paused or playing', async () => {
   const directory = temporaryDirectory('catcut-arrows-')
-  const input = makeVideo(directory)
+  const input = syntheticVideo(directory, true)
   const app = await launch(input)
   const window = await app.firstWindow()
-  const preview = window.locator('.preview-stage > video')
+  const preview = window.locator('.camera-layer > video:not(.preview-transition-previous)')
   await expect.poll(() => preview.evaluate((video) => (video as HTMLVideoElement).readyState)).toBeGreaterThanOrEqual(1)
-  await seek(window, 0)
+  await seekTimeline(window, 0)
   await window.keyboard.press('ArrowRight')
   await expect.poll(() => preview.evaluate((video) => (video as HTMLVideoElement).currentTime)).toBeCloseTo(5, 0)
   await click(window.getByRole('button', { name: 'Play', exact: true }))
@@ -91,7 +73,7 @@ test('moves five seconds with arrow keys while paused or playing', async () => {
 
 test('keeps timeline and zoom controls on the transport row', async () => {
   const directory = temporaryDirectory('catcut-zoom-')
-  const input = makeVideo(directory)
+  const input = syntheticVideo(directory, true)
   const app = await launch(input)
   const window = await app.firstWindow()
   const timeline = window.locator('.timeline')
@@ -100,7 +82,7 @@ test('keeps timeline and zoom controls on the transport row', async () => {
   await expect(window.locator('.timeline-toolbar')).toHaveCount(0)
   expect(await transport.locator(':scope > *').evaluateAll((elements) => elements.map((element) => (
     element.getAttribute('aria-label') ?? element.textContent.trim()
-  )))).toEqual(['Play', 'Cut point', 'Cut', 'Undo', 'Redo', 'Timeline', '00:00.00 / 00:06.00', 'Zoom out', 'Zoom in'])
+  )))).toEqual(['Previous frame', 'Play', 'Next frame', 'Cut point', 'Cut', 'Undo', 'Redo', 'Timeline', '00:00.00 / 00:06.00', 'Zoom out', 'Zoom in'])
   const playBox = await window.getByRole('button', { name: 'Play', exact: true }).boundingBox()
   const cutPointBox = await window.getByRole('button', { name: 'Cut point', exact: true }).boundingBox()
   expect(playBox?.width ?? 0).toBeGreaterThan(cutPointBox?.width ?? 0)
@@ -114,7 +96,7 @@ test('keeps timeline and zoom controls on the transport row', async () => {
 
 test('shows the source frame under the timeline pointer', async () => {
   const directory = temporaryDirectory('catcut-hover-preview-')
-  const input = makeVideo(directory)
+  const input = syntheticVideo(directory, true)
   const app = await launch(input)
   const window = await app.firstWindow()
   const timeline = window.locator('.timeline')
@@ -134,10 +116,10 @@ test('shows the source frame under the timeline pointer', async () => {
 
 test('highlights and cuts the chosen side of one cut point without a popup', async () => {
   const directory = temporaryDirectory('catcut-one-point-')
-  const input = makeVideo(directory)
+  const input = syntheticVideo(directory, true)
   const app = await launch(input)
   const window = await app.firstWindow()
-  await seek(window, 0.4)
+  await seekTimeline(window, 0.4)
   await click(window.getByRole('button', { name: 'Cut point', exact: true }))
   const selection = window.locator('.timeline-selection')
   await expect(selection).toBeVisible()
@@ -146,9 +128,9 @@ test('highlights and cuts the chosen side of one cut point without a popup', asy
   await click(window.getByRole('button', { name: 'Redo', exact: true }))
   await expect(selection).toBeVisible()
   await expect.poll(() => selection.evaluate((element) => parseFloat((element as HTMLElement).style.left))).toBe(0)
-  await seek(window, 0.6)
+  await seekTimeline(window, 0.6)
   await expect.poll(() => selection.evaluate((element) => parseFloat((element as HTMLElement).style.left))).toBeCloseTo(40, 1)
-  await seek(window, 0.2)
+  await seekTimeline(window, 0.2)
   await expect.poll(() => selection.evaluate((element) => parseFloat((element as HTMLElement).style.left))).toBe(0)
   await expect(window.getByRole('dialog')).toHaveCount(0)
   await click(window.getByRole('button', { name: 'Cut', exact: true }))
@@ -158,24 +140,24 @@ test('highlights and cuts the chosen side of one cut point without a popup', asy
 
 test('supports more than two cut points and selects the partition at the playhead', async () => {
   const directory = temporaryDirectory('catcut-two-points-')
-  const input = makeVideo(directory)
+  const input = syntheticVideo(directory, true)
   const app = await launch(input)
   const window = await app.firstWindow()
-  await seek(window, 0.25)
+  await seekTimeline(window, 0.25)
   await click(window.getByRole('button', { name: 'Cut point', exact: true }))
-  await seek(window, 0.5)
+  await seekTimeline(window, 0.5)
   await click(window.getByRole('button', { name: 'Cut point', exact: true }))
-  await seek(window, 0.75)
+  await seekTimeline(window, 0.75)
   await click(window.getByRole('button', { name: 'Cut point', exact: true }))
   await expect(window.locator('.selection-point')).toHaveCount(3)
   await expect(window.getByRole('button', { name: 'Cut point', exact: true })).toHaveText('Cut point')
-  await seek(window, 0.625)
+  await seekTimeline(window, 0.625)
   const selection = window.locator('.timeline-selection')
   await expect.poll(() => selection.evaluate((element) => ({
     left: parseFloat((element as HTMLElement).style.left),
     width: parseFloat((element as HTMLElement).style.width)
   }))).toEqual({ left: 50, width: 25 })
-  await seek(window, 0.9)
+  await seekTimeline(window, 0.9)
   await expect.poll(() => selection.evaluate((element) => ({
     left: parseFloat((element as HTMLElement).style.left),
     width: parseFloat((element as HTMLElement).style.width)
@@ -184,14 +166,14 @@ test('supports more than two cut points and selects the partition at the playhea
 
 test('keeps the preview healthy after repeated editing operations', async () => {
   const directory = temporaryDirectory('catcut-edit-')
-  const input = makeVideo(directory)
+  const input = syntheticVideo(directory, true)
   const app = await launch(input)
   const window = await app.firstWindow()
-  const preview = window.locator('.preview-stage > video')
+  const preview = window.locator('.camera-layer > video:not(.preview-transition-previous)')
   await expect.poll(() => preview.evaluate((video) => (video as HTMLVideoElement).readyState)).toBeGreaterThanOrEqual(2)
-  await seek(window, 0.2)
+  await seekTimeline(window, 0.2)
   await click(window.getByRole('button', { name: 'Cut point', exact: true }))
-  await seek(window, 0.7)
+  await seekTimeline(window, 0.7)
   await click(window.getByRole('button', { name: 'Cut point', exact: true }))
   await expect(window.locator('.timeline-selection')).toBeVisible()
   await click(window.getByRole('button', { name: 'Cut', exact: true }))
@@ -208,7 +190,7 @@ test('keeps the preview healthy after repeated editing operations', async () => 
 
 test('renders added text into the exported video', async () => {
   const directory = temporaryDirectory('catcut-text-')
-  const input = makeVideo(directory)
+  const input = syntheticVideo(directory, true)
   const output = join(directory, 'output.mp4')
   const app = await launch(input, output)
   const window = await app.firstWindow()
@@ -217,6 +199,7 @@ test('renders added text into the exported video', async () => {
   const textBox = window.getByRole('textbox', { name: 'Text' })
   await expect(textBox).toBeFocused()
   await textBox.fill('VISIBLE TEXT')
+  await expect(window.locator('.preview-text')).toHaveCSS('font-weight', '700')
   await window.evaluate(() => {
     const root = document.documentElement
     root.dataset.sawNan = 'false'
@@ -241,7 +224,7 @@ test('renders added text into the exported video', async () => {
 
 test('renders SVG library images into the exported video', async () => {
   const directory = temporaryDirectory('catcut-svg-')
-  const input = makeVideo(directory)
+  const input = syntheticVideo(directory, true)
   const output = join(directory, 'output.mp4')
   const app = await launch(input, output)
   const window = await app.firstWindow()
@@ -261,7 +244,7 @@ test('renders SVG library images into the exported video', async () => {
 
 test('exports WebM video audio together with an OGG effect', async () => {
   const directory = temporaryDirectory('catcut-media-export-')
-  const input = makeVideo(directory)
+  const input = syntheticVideo(directory, true)
   const output = join(directory, 'output.mp4')
   const app = await launch(input, output)
   const window = await app.firstWindow()
@@ -286,7 +269,7 @@ test('exports WebM video audio together with an OGG effect', async () => {
 
 test('prepares, previews, and exports an external GIF', async () => {
   const directory = temporaryDirectory('catcut-gif-')
-  const input = makeVideo(directory)
+  const input = syntheticVideo(directory, true)
   const gif = join(directory, 'animated.gif')
   const output = join(directory, 'output.mp4')
   execFileSync(ffmpeg, [
@@ -392,7 +375,7 @@ test('ripple-inserts and exports a second main-timeline video', async () => {
 
 test('opens and exports a centered vertical Short project', async () => {
   const directory = temporaryDirectory('catcut-short-')
-  const input = makeVideo(directory)
+  const input = syntheticVideo(directory, true)
   const output = join(directory, 'short.mp4')
   const app = await launch(input, output, { CATCUT_E2E_VIDEO: input })
   const window = await app.firstWindow()
@@ -406,7 +389,7 @@ test('opens and exports a centered vertical Short project', async () => {
 
 test('shows the cropped Short frame and active meme overlay in the timeline preview', async () => {
   const directory = temporaryDirectory('catcut-short-hover-')
-  const input = makeVideo(directory)
+  const input = syntheticVideo(directory, true)
   const app = await launch(input, undefined, { CATCUT_E2E_VIDEO: input })
   const window = await app.firstWindow()
   await click(window.getByRole('button', { name: 'Open Short', exact: true }))
@@ -422,7 +405,7 @@ test('shows the cropped Short frame and active meme overlay in the timeline prev
   const preview = window.locator('.timeline-hover-preview')
   await expect(preview).toBeVisible()
   await expect(preview.locator('.timeline-hover-overlay')).toHaveCount(1)
-  await expect(preview.locator('.timeline-hover-frame > video')).toHaveCSS('object-fit', 'cover')
+  await expect(preview.locator('.timeline-hover-camera > video:not(.preview-transition-previous)')).toHaveCSS('object-fit', 'cover')
   const frame = await preview.locator('.timeline-hover-frame').boundingBox()
   expect(frame).not.toBeNull()
   expect((frame?.width ?? 0) / (frame?.height ?? 1)).toBeCloseTo(9 / 16, 2)
@@ -430,7 +413,7 @@ test('shows the cropped Short frame and active meme overlay in the timeline prev
 
 test('restores normal-close state and Reset project forgets it', async () => {
   const directory = temporaryDirectory('catcut-restore-')
-  const input = makeVideo(directory)
+  const input = syntheticVideo(directory, true)
   const first = await launch(input)
   const firstWindow = await first.firstWindow()
   await click(firstWindow.getByRole('button', { name: 'Text', exact: true }))
@@ -451,7 +434,7 @@ test('restores normal-close state and Reset project forgets it', async () => {
   expect(await restored.evaluate(({ Menu }) => {
     const project = Menu.getApplicationMenu()?.items.find((item) => item.label === 'Project')
     return project?.submenu?.items.filter((item) => item.type !== 'separator').map((item) => item.label)
-  })).toEqual(['CatCut 0.2.3', 'Reset project'])
+  })).toEqual(['CatCut 0.3.0', 'Reset project'])
   await restoredWindow.evaluate(() => { window.confirm = () => true })
   await restored.evaluate(({ Menu }) => {
     const reset = Menu.getApplicationMenu()?.items

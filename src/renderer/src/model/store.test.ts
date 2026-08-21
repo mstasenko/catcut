@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { CatCutApi, MediaMetadata } from '@shared/types'
+import type { CatCutApi, MediaMetadata, SourceSegment, VideoSegment } from '@shared/types'
 import { isVideoOverlay, savedSession, selectedOverlay, useEditorStore } from './store'
 import { createSession } from './timeline'
 
@@ -7,6 +7,11 @@ const metadata: MediaMetadata = {
   path: '/source.mp4', name: 'source.mp4', size: 100, modifiedAt: 1, duration: 10,
   width: 1280, height: 720, fps: 30, videoCodec: 'h264', audioCodec: 'aac',
   hasAudio: true, rotation: 0, pixelFormat: 'yuv420p'
+}
+
+function video(segment: SourceSegment | undefined): VideoSegment {
+  if (!segment || segment.kind === 'freeze') throw new Error('video segment missing')
+  return segment
 }
 
 function api(): CatCutApi {
@@ -93,10 +98,10 @@ describe('editor store', () => {
     })
     const session = useEditorStore.getState().session
     expect(session?.sources).toHaveLength(2)
-    expect(session?.segments.map((segment) => segment.sourceEnd - segment.sourceStart)).toEqual([4, 2, 6])
+    expect(session?.segments.map((segment) => video(segment).sourceEnd - video(segment).sourceStart)).toEqual([4, 2, 6])
     expect(session?.segments[1]?.sourceId).toBe(session?.sources[1]?.id)
-    expect(session?.segments[1]?.transition).toEqual({ effect: 'dissolve', duration: 0.5 })
-    expect(session?.segments[2]?.transition).toEqual({ effect: 'slideleft', duration: 0.75 })
+    expect(video(session?.segments[1]).transition).toEqual({ effect: 'dissolve', duration: 0.5 })
+    expect(video(session?.segments[2]).transition).toEqual({ effect: 'slideleft', duration: 0.75 })
     useEditorStore.getState().undo()
     expect(useEditorStore.getState().session?.segments).toHaveLength(1)
   })
@@ -144,7 +149,7 @@ describe('editor store', () => {
     useEditorStore.getState().setPlayhead(6)
     useEditorStore.getState().selectPoint()
     useEditorStore.getState().deleteSelection()
-    expect(useEditorStore.getState().session?.segments[0]?.sourceEnd).toBe(4)
+    expect(video(useEditorStore.getState().session?.segments[0]).sourceEnd).toBe(4)
     expect(useEditorStore.getState().session?.dirty).toBe(true)
     useEditorStore.getState().undo()
     expect(useEditorStore.getState().session?.segments).toHaveLength(1)
@@ -236,7 +241,7 @@ describe('editor store', () => {
     useEditorStore.getState().selectPoint()
     useEditorStore.getState().setPlayhead(1)
     useEditorStore.getState().deleteSelection()
-    expect(useEditorStore.getState().session?.segments[0]?.sourceStart).toBe(3)
+    expect(video(useEditorStore.getState().session?.segments[0]).sourceStart).toBe(3)
     useEditorStore.getState().setPlayhead(5)
     useEditorStore.getState().selectPoint()
     useEditorStore.getState().clearSelection()
@@ -276,6 +281,94 @@ describe('editor store', () => {
       x: 0, y: 0, width: 1, height: 1, opacity: 1, loop: false,
       audioEnabled: false, hasAudio: false, volume: 1, sourceIn: 0, sourceDuration: 1
     })).toBe(true)
+  })
+
+  it('adds and removes focus zooms and freeze frames as undoable edits', async () => {
+    await useEditorStore.getState().loadVideo('/source.mp4')
+    const store = useEditorStore.getState()
+    store.setPlayhead(4)
+    const historyWithoutSelection = useEditorStore.getState().history.length
+    store.addFocusZoom(1.5, 0.25, 0.75)
+    expect(useEditorStore.getState().session?.focusZooms).toEqual([])
+    expect(useEditorStore.getState().history).toHaveLength(historyWithoutSelection)
+    store.selectPoint()
+    store.setPlayhead(2)
+    store.selectPoint()
+    store.setPlayhead(3)
+    store.addFocusZoom(1.5, 0.25, 0.75)
+    expect(useEditorStore.getState().session?.focusZooms).toHaveLength(1)
+    useEditorStore.getState().removeFocusZoom()
+    expect(useEditorStore.getState().session?.focusZooms).toEqual([])
+    useEditorStore.getState().insertFreeze(1)
+    expect(useEditorStore.getState().session?.segments.some((segment) => segment.kind === 'freeze')).toBe(true)
+    useEditorStore.getState().removeFreeze()
+    expect(useEditorStore.getState().session?.segments.some((segment) => segment.kind === 'freeze')).toBe(false)
+  })
+
+  it('inserts and removes Replay as single undoable edits without no-op history', async () => {
+    await useEditorStore.getState().loadVideo('/source.mp4')
+    const initialHistory = useEditorStore.getState().history.length
+    useEditorStore.getState().insertReplay()
+    expect(useEditorStore.getState().history).toHaveLength(initialHistory)
+    useEditorStore.getState().setPlayhead(2)
+    useEditorStore.getState().selectPoint()
+    useEditorStore.getState().setPlayhead(4)
+    useEditorStore.getState().selectPoint()
+    useEditorStore.getState().setPlayhead(3)
+    const before = structuredClone(useEditorStore.getState().session)
+    const historyBeforeReplay = useEditorStore.getState().history.length
+    useEditorStore.getState().insertReplay()
+    expect(useEditorStore.getState().history).toHaveLength(historyBeforeReplay + 1)
+    expect(useEditorStore.getState().session?.segments.some((segment) => segment.replayGroupId)).toBe(true)
+    useEditorStore.getState().undo()
+    expect(useEditorStore.getState().session).toEqual(before)
+    useEditorStore.getState().redo()
+    const historyBeforeRemoval = useEditorStore.getState().history.length
+    useEditorStore.getState().removeReplay()
+    expect(useEditorStore.getState().history).toHaveLength(historyBeforeRemoval + 1)
+    expect(useEditorStore.getState().session?.segments.some((segment) => segment.replayGroupId)).toBe(false)
+  })
+
+  it('changes one text animation once and ignores the selected value', async () => {
+    await useEditorStore.getState().loadVideo('/source.mp4')
+    useEditorStore.getState().addText()
+    const text = useEditorStore.getState().session?.overlays[0]
+    if (!text) throw new Error('text overlay missing')
+    const before = useEditorStore.getState().history.length
+    useEditorStore.getState().setTextAnimation(text.id, 'pop')
+    expect(useEditorStore.getState().history).toHaveLength(before + 1)
+    expect(useEditorStore.getState().session?.overlays[0]).toMatchObject({ animation: 'pop' })
+    useEditorStore.getState().setTextAnimation(text.id, 'pop')
+    expect(useEditorStore.getState().history).toHaveLength(before + 1)
+    useEditorStore.getState().undo()
+    expect(useEditorStore.getState().session?.overlays[0]).not.toHaveProperty('animation')
+  })
+
+  it('stores one audio setting change as one undo entry and ignores repeats', async () => {
+    await useEditorStore.getState().loadVideo('/source.mp4')
+    await useEditorStore.getState().addExternalMedia()
+    const overlay = useEditorStore.getState().session?.overlays[0]
+    if (!overlay) throw new Error('audio overlay missing')
+    const before = useEditorStore.getState().history.length
+    useEditorStore.getState().updateOverlay(overlay.id, { fadeIn: 0.25, duckGameAudio: true, gameAudioLevel: 0.3 })
+    expect(useEditorStore.getState().history).toHaveLength(before + 1)
+    useEditorStore.getState().updateOverlay(overlay.id, { fadeIn: 0.25, duckGameAudio: true, gameAudioLevel: 0.3 })
+    expect(useEditorStore.getState().history).toHaveLength(before + 1)
+    useEditorStore.getState().undo()
+    expect(useEditorStore.getState().session?.overlays[0]).not.toHaveProperty('fadeIn')
+  })
+
+  it('changes Speed only for a highlighted cut-point partition', async () => {
+    await useEditorStore.getState().loadVideo('/source.mp4')
+    const before = useEditorStore.getState().history.length
+    useEditorStore.getState().setSpeed(0.5)
+    expect(useEditorStore.getState().history).toHaveLength(before)
+    expect(video(useEditorStore.getState().session?.segments[0]).playbackRate).toBeUndefined()
+    useEditorStore.getState().setPlayhead(2)
+    useEditorStore.getState().selectPoint()
+    useEditorStore.getState().setPlayhead(1)
+    useEditorStore.getState().setSpeed(0.5)
+    expect(video(useEditorStore.getState().session?.segments[0]).playbackRate).toBe(0.5)
   })
 
   it('reports API and proxy failures without losing the source', async () => {

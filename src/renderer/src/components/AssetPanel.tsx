@@ -1,10 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { AssetItem, InsertTransitions, TransitionEffect } from '@shared/types'
+import type { AssetItem, EditSession, FocusZoomAmount, FreezeDuration, InsertTransitions, TransitionEffect, VideoSpeed } from '@shared/types'
+import { focusZoomAmounts, freezeDurations, videoSpeeds } from '@shared/types'
+import { deletionRange, isFreezeSegment, positionAtOutputTime, segmentPlaybackRate } from '../model/timeline'
+import { transitionAtOutputTime } from '../model/transitions'
+import { replayEligibility } from '../model/replay'
+import { segmentsForOutputRange } from '../model/segment-ranges'
+import { useMediaUrl } from './useMediaUrl'
 
 export type AssetCategory = Exclude<AssetItem['type'], 'gif'>
 
 interface AssetPanelProps {
   assets: AssetItem[]
+  session: EditSession
   category: AssetCategory | null
   onCategory: (category: AssetCategory | null) => void
   onText: () => void
@@ -12,7 +19,16 @@ interface AssetPanelProps {
   onInsert: (transitions: InsertTransitions) => void
   onAsset: (asset: AssetItem) => void
   onError: (message: string) => void
+  onSpeed: (rate: VideoSpeed) => void
+  onFocusPick: (zoom: FocusZoomAmount) => void
+  onRemoveFocusZoom: () => void
+  onFreeze: (duration: FreezeDuration) => void
+  onRemoveFreeze: () => void
+  onReplay: () => void
+  onRemoveReplay: () => void
 }
+
+type EffectView = 'speed' | 'zoom' | 'freeze'
 
 const categoryNames: Record<AssetCategory, string> = {
   image: 'Images', video: 'Videos', audio: 'Audio'
@@ -66,26 +82,8 @@ function AssetRow({ asset, previewing, onPreview, onAsset, onHover }: {
   )
 }
 
-function useAssetUrl(asset: AssetItem | null): string {
-  const [url, setUrl] = useState('')
-  useEffect(() => {
-    let active = true
-    // Do not briefly show the previous card's media while the next protocol URL
-    // is resolving. The active flag also prevents a late hover from winning.
-    setUrl('')
-    if (!asset) {
-      return
-    }
-    void window.catcut.getPathUrl(asset.path).then((pathUrl) => {
-      if (active) setUrl(pathUrl)
-    })
-    return () => { active = false }
-  }, [asset])
-  return url
-}
-
 function HoverPreview({ asset }: { asset: AssetItem | null }): React.JSX.Element | null {
-  const url = useAssetUrl(asset)
+  const url = useMediaUrl(asset?.path)
   if (!asset || asset.type === 'audio' || !url) return null
   return (
     <aside className="asset-hover-card" aria-label={`Preview of ${asset.name}`}>
@@ -97,9 +95,12 @@ function HoverPreview({ asset }: { asset: AssetItem | null }): React.JSX.Element
   )
 }
 
-function AddMenu({ onCategory, onText, onNew, onInsert }: Pick<AssetPanelProps, 'onCategory' | 'onText' | 'onNew'> & {
+function AddMenu({ onCategory, onText, onNew, onInsert, onEffect, session, onReplay, onRemoveReplay }: Pick<AssetPanelProps, 'onCategory' | 'onText' | 'onNew' | 'session' | 'onReplay' | 'onRemoveReplay'> & {
   onInsert: () => void
+  onEffect: (effect: EffectView) => void
 }): React.JSX.Element {
+  const replay = replayEligibility(session)
+  const selection = deletionRange(session)
   return (
     <section className="asset-panel add-menu">
       <div className="panel-heading"><strong>Insert</strong></div>
@@ -112,8 +113,73 @@ function AddMenu({ onCategory, onText, onNew, onInsert }: Pick<AssetPanelProps, 
         <button onClick={() => onCategory('audio')}>Audio</button>
         <button onClick={onNew}>New</button>
       </div>
+      <div className="panel-heading add-heading"><strong>Effects</strong></div>
+      <div className="effect-add">
+        <button disabled={!selection} onClick={() => onEffect('speed')}>Speed</button>
+        <button disabled={Boolean(replay.reason)} onClick={replay.removableGroupId ? onRemoveReplay : onReplay}>
+          {replay.removableGroupId ? 'Remove Replay' : 'Replay'}
+        </button>
+        <button disabled={!selection} title="Focus Zoom" onClick={() => onEffect('zoom')}>Zoom</button>
+        <button title="Freeze Frame" onClick={() => onEffect('freeze')}>Freeze</button>
+      </div>
+      {replay.reason && <p className="empty-note">{replay.reason}</p>}
     </section>
   )
+}
+
+function speedLabel(rate: VideoSpeed): string {
+  if (rate === 0.25) return '¼×'
+  if (rate === 0.5) return '½×'
+  return `${rate}×`
+}
+
+function currentSpeed(session: EditSession): VideoSpeed {
+  const position = positionAtOutputTime(session.segments, session.playhead)
+  return position ? segmentPlaybackRate(position.segment) : 1
+}
+
+function EffectHeading({ title, onBack }: { title: string; onBack: () => void }): React.JSX.Element {
+  return <div className="panel-heading"><button onClick={onBack}>← Back</button><strong>{title}</strong></div>
+}
+
+function SpeedOptions({ session, onBack, onSpeed }: Pick<AssetPanelProps, 'session' | 'onSpeed'> & { onBack: () => void }): React.JSX.Element {
+  const range = deletionRange(session)
+  const disabled = !range || segmentsForOutputRange(session.segments, range[0], range[1]).every(isFreezeSegment)
+  const current = currentSpeed(session)
+  return <section className="asset-panel effect-menu"><EffectHeading title="Speed" onBack={onBack} />
+    <p className="empty-note">Changes the highlighted video moment.</p>
+    <div className="effect-options">{videoSpeeds.map((rate) => <button className={rate === current ? 'selected-effect' : undefined} disabled={disabled} key={rate} onClick={() => onSpeed(rate)}>{speedLabel(rate)}</button>)}</div>
+    {disabled && <p className="empty-note">Speed does not change a freeze frame.</p>}
+  </section>
+}
+
+function ZoomOptions(props: Pick<AssetPanelProps, 'session' | 'onFocusPick' | 'onRemoveFocusZoom'> & { onBack: () => void }): React.JSX.Element {
+  const range = deletionRange(props.session)
+  const active = Boolean(range && props.session.focusZooms.some((effect) => effect.start < range[1] && effect.start + effect.duration > range[0]))
+  return <section className="asset-panel effect-menu"><EffectHeading title="Focus Zoom" onBack={props.onBack} />
+    <p className="empty-note">Choose a zoom, then click what to focus on.</p>
+    <div className="effect-options">{focusZoomAmounts.map((zoom) => <button disabled={!range} key={zoom} onClick={() => props.onFocusPick(zoom)}>{zoom}×</button>)}</div>
+    {active && <button className="wide-button" onClick={props.onRemoveFocusZoom}>Zoom off</button>}
+  </section>
+}
+
+function FreezeOptions(props: Pick<AssetPanelProps, 'session' | 'onFreeze' | 'onRemoveFreeze'> & { onBack: () => void }): React.JSX.Element {
+  const position = positionAtOutputTime(props.session.segments, props.session.playhead)
+  const frozen = Boolean(position && isFreezeSegment(position.segment))
+  const transition = transitionAtOutputTime(props.session.segments, props.session.playhead) !== null
+  return <section className="asset-panel effect-menu"><EffectHeading title="Freeze Frame" onBack={props.onBack} />
+    <p className="empty-note">Holds the exact frame at the playhead.</p>
+    {frozen
+      ? <button className="wide-button" onClick={props.onRemoveFreeze}>Remove freeze</button>
+      : <div className="effect-options">{freezeDurations.map((duration) => <button className={duration === 1 ? 'selected-effect' : undefined} disabled={transition} key={duration} onClick={() => props.onFreeze(duration)}>{duration}s</button>)}</div>}
+    {transition && <p className="empty-note">Move the playhead outside the transition to add a freeze frame.</p>}
+  </section>
+}
+
+function EffectOptions({ effect, onBack, ...props }: AssetPanelProps & { effect: EffectView; onBack: () => void }): React.JSX.Element {
+  if (effect === 'speed') return <SpeedOptions session={props.session} onBack={onBack} onSpeed={props.onSpeed} />
+  if (effect === 'zoom') return <ZoomOptions session={props.session} onBack={onBack} onFocusPick={props.onFocusPick} onRemoveFocusZoom={props.onRemoveFocusZoom} />
+  return <FreezeOptions session={props.session} onBack={onBack} onFreeze={props.onFreeze} onRemoveFreeze={props.onRemoveFreeze} />
 }
 
 function TransitionSelect({ label, value, onChange }: {
@@ -177,6 +243,7 @@ function InsertVideoPanel({ onBack, onInsert }: {
 export function AssetPanel(props: AssetPanelProps): React.JSX.Element {
   const [filter, setFilter] = useState('')
   const [inserting, setInserting] = useState(false)
+  const [effect, setEffect] = useState<EffectView | null>(null)
   const [previewing, setPreviewing] = useState<string | null>(null)
   const [hovered, setHovered] = useState<AssetItem | null>(null)
   const preview = useRef<HTMLAudioElement | null>(null)
@@ -210,12 +277,17 @@ export function AssetPanel(props: AssetPanelProps): React.JSX.Element {
   if (inserting) {
     return <InsertVideoPanel onBack={() => setInserting(false)} onInsert={props.onInsert} />
   }
+  if (effect) return <EffectOptions {...props} effect={effect} onBack={() => setEffect(null)} />
   if (!props.category) {
     return <AddMenu
       onCategory={props.onCategory}
       onText={props.onText}
       onNew={props.onNew}
       onInsert={() => setInserting(true)}
+      onEffect={setEffect}
+      session={props.session}
+      onReplay={props.onReplay}
+      onRemoveReplay={props.onRemoveReplay}
     />
   }
   const goBack = (): void => {

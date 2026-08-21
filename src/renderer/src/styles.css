@@ -71,6 +71,13 @@ input, select, textarea { color: #f5f6f8; background: #17191e; border: 1px solid
 .panel-heading button { padding: 4px 7px; font-size: 11px; }
 .quick-add { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
 .quick-add button { font-size: 12px; padding: 8px 4px; }
+.effect-add { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
+.effect-add button { padding: 8px; text-align: left; }
+.effect-menu { overflow-y: auto; }
+.effect-menu .empty-note { margin: 0; }
+.effect-options { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }
+.effect-options button { padding: 8px 3px; }
+.effect-options .selected-effect { border-color: #54dba8; color: #a7f3d6; }
 .asset-search { width: 100%; padding: 8px; }
 .asset-list { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; padding-right: 2px; scrollbar-color: #50545f transparent; }
 .asset-list > * { flex: 0 0 auto; }
@@ -91,13 +98,26 @@ input, select, textarea { color: #f5f6f8; background: #17191e; border: 1px solid
 .preview-error { position: absolute; z-index: 10; inset: 0; display: grid; place-items: center; padding: 24px; color: #ffc5c5; background: #210d0dcc; text-align: center; }
 .transport { position: relative; width: 100%; height: 40px; flex: 0 0 40px; display: flex; align-items: center; justify-content: flex-start; gap: 6px; font-variant-numeric: tabular-nums; color: #aab0ba; font-size: 11px; }
 .transport button { padding: 4px 7px; font-size: 11px; }
+.transport-step { min-width: 28px; padding-inline: 5px !important; }
+.camera-layer { position: absolute; inset: 0; overflow: hidden; }
+.focus-prompt { position: absolute; z-index: 10; inset: 45% 0 auto; text-align: center; color: #fff; text-shadow: 0 2px 6px #000; pointer-events: none; }
+.preview-stage.focus-picking { cursor: crosshair; }
+.preview-stage.focus-picking .visual-overlay { pointer-events: none; }
 .transport .play-button { min-width: 94px; padding-inline: 14px; background: #54dba8; border-color: #54dba8; color: #07140f; font-weight: 800; }
 .transport .play-button:hover:not(:disabled) { background: #73edbe; border-color: #73edbe; }
-.transport .timeline-title { margin-left: auto; color: #d5d8df; font-weight: 700; }
+.transport .transport-undo { margin-left: auto; }
+.transport .timeline-title { color: #d5d8df; font-weight: 700; }
 .transport .timeline-time { margin-left: 2px; }
+@media (max-width: 1000px) {
+  .transport { gap: 2px; }
+  .transport button { padding-inline: 4px; white-space: nowrap; }
+  .transport .play-button { min-width: 70px; padding-inline: 8px; }
+  .transport .timeline-time { white-space: nowrap; }
+}
 .visual-overlay { position: absolute; cursor: move; touch-action: none; }
 .visual-overlay.selected { outline: 2px solid #54dba8; outline-offset: 1px; }
 .visual-overlay img, .visual-overlay video { width: 100%; height: 100%; object-fit: contain; pointer-events: none; }
+.preview-text-animation { width: 100%; height: 100%; transform-origin: center center; }
 .preview-text { width: 100%; height: 100%; display: flex; align-items: flex-start; white-space: pre-wrap; overflow: visible; line-height: 1.05; pointer-events: none; }
 .resize-handle { position: absolute; width: 13px; height: 13px; min-width: 0; padding: 0; right: -7px; bottom: -7px; border: 2px solid #102018; border-radius: 50%; background: #54dba8; cursor: nwse-resize; }
 
@@ -107,25 +127,39 @@ input, select, textarea { color: #f5f6f8; background: #17191e; border: 1px solid
 .video-track { position: absolute; display: flex; left: 0; right: 0; top: 4px; height: 38px; }
 .source-segment { position: relative; min-width: 2px; border: 1px solid #3b6977; background: #284a56; overflow: hidden; }
 .source-segment[data-transition]::before { content: ''; position: absolute; z-index: 2; left: 0; top: 0; bottom: 0; width: 8px; background: linear-gradient(90deg, #54dba8, transparent); }
+.speed-badge { position: absolute; z-index: 3; right: 3px; bottom: 3px; padding: 1px 3px; border-radius: 2px; background: rgba(5, 12, 18, .72); color: #d5d8df; font-size: 9px; line-height: 1.1; }
+.focus-zoom-range { position: absolute; z-index: 4; top: 0; height: 3px; background: #54dba8; pointer-events: none; }
+.focus-zoom-range span { position: absolute; top: 3px; left: 2px; padding: 0 3px; border-radius: 2px; background: rgba(7,20,15,.78); color: #a7f3d6; font-size: 8px; }
+.replay-range { position: absolute; z-index: 4; bottom: 0; height: 3px; background: #7fd6ff; pointer-events: none; }
+.replay-range span { position: absolute; right: 2px; bottom: 3px; padding: 0 3px; border-radius: 2px; background: rgba(5,12,18,.78); color: #bdeaff; font-size: 8px; }
+.source-segment.freeze-segment { background: repeating-linear-gradient(135deg, #284a56 0 5px, #1d3944 5px 10px); }
+.freeze-badge { position: absolute; inset: 50% auto auto 50%; transform: translate(-50%, -50%); white-space: nowrap; font-size: 9px; color: #d5eaf0; }
 .waveform { position: absolute; inset: 0; width: 100%; height: 100%; }.waveform path { fill: #9fd9e7; opacity: .72; }
 .overlay-track { position: absolute; left: 0; right: 0; top: 49px; height: 30px; }
 .timeline-overlay { position: absolute; height: 27px; min-width: 5px; padding: 2px 5px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: #101114; border: 1px solid #fff4; font-size: 10px; text-align: left; }
 .timeline-overlay.selected { outline: 2px solid white; z-index: 2; }
+.overlay-fade { position: absolute; inset-block: 0; pointer-events: none; }
+.overlay-fade-in { left: 0; background: linear-gradient(90deg, rgb(16 20 24 / 75%), transparent); }
+.overlay-fade-out { right: 0; background: linear-gradient(270deg, rgb(16 20 24 / 75%), transparent); }
+.game-sound-badge { position: absolute; right: 3px; top: 2px; padding: 0 3px; border-radius: 3px; background: rgb(12 16 20 / 72%); font-size: 9px; line-height: 13px; pointer-events: none; }
 .timeline-selection { position: absolute; top: 0; bottom: 0; background: #ff505533; border-left: 1px solid #ff6e74; border-right: 1px solid #ff6e74; pointer-events: none; }
 .selection-point { position: absolute; z-index: 3; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: #ff6e74; pointer-events: none; }.selection-point::before { content: ''; position: absolute; left: -4px; top: 0; width: 10px; height: 7px; background: #ff6e74; clip-path: polygon(0 0,100% 0,50% 100%); }
 .playhead { position: absolute; z-index: 4; top: 0; bottom: 0; width: 1px; background: #ffda63; pointer-events: none; }.playhead::before { content: ''; position: absolute; left: -4px; width: 9px; height: 8px; background: #ffda63; clip-path: polygon(0 0,100% 0,50% 100%); }
 .timeline-hover-preview { position: fixed; z-index: 20; padding: 5px; border: 1px solid #5a6573; border-radius: 5px; background: #101216f2; box-shadow: 0 8px 24px #000b; pointer-events: none; }
 .timeline-hover-frame { position: relative; overflow: hidden; background: #000; }
-.timeline-hover-frame > video { position: absolute; inset: 0; display: block; width: 100%; height: 100%; background: #000; transform-origin: center; }
+.timeline-hover-camera { position: absolute; inset: 0; overflow: hidden; transform-origin: top left; }
+.timeline-hover-camera > video { position: absolute; inset: 0; display: block; width: 100%; height: 100%; background: #000; transform-origin: center; }
 .timeline-hover-overlay { position: absolute; overflow: hidden; pointer-events: none; }
 .timeline-hover-overlay img, .timeline-hover-overlay video { display: block; width: 100%; height: 100%; object-fit: contain; }
 .timeline-hover-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.timeline-hover-text-animation { width: 100%; height: 100%; transform-origin: center center; }
 .timeline-hover-preview span { display: block; overflow: hidden; margin-top: 4px; color: #e7ebf2; font-size: 10px; line-height: 14px; text-overflow: ellipsis; white-space: nowrap; }
 
 .control-row, .stacked-control { display: flex; gap: 8px; margin: 10px 0; color: #acb1bb; font-size: 11px; }
 .control-row { align-items: center; justify-content: space-between; }
 .control-row input[type='number'], .control-row select { width: 105px; padding: 5px; }
 .control-row input[type='color'] { width: 44px; height: 28px; padding: 2px; }
+.compact-controls { display: flex; gap: 4px; }.compact-controls select { width: 72px; }.compact-controls button { min-width: 29px; padding: 4px; }
 .stacked-control { flex-direction: column; }.stacked-control textarea { min-height: 72px; resize: vertical; padding: 7px; }
 .wide-button { width: 100%; }.danger { color: #ffb4b4; }.inspector .empty-note { margin-top: 35px; text-align: center; }
 

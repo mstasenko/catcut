@@ -9,6 +9,7 @@ CatCut is a small, fast video editor for Ubuntu. It trims and combines videos an
 - Add timed text, images, videos, and audio.
 - Move and resize visual overlays directly on the preview.
 - Insert additional videos with optional transitions, including fades, wipes, slides, zoom, and blur.
+- Slow down or speed up a marked moment, focus zoom on one click, or hold an exact frame.
 - Create landscape videos or cropped 9:16 Shorts.
 - Preview images and videos before adding them.
 - Adjust overlay timing, opacity, volume, text styling, video audio, and looping.
@@ -76,6 +77,7 @@ Useful shortcuts:
 | --- | --- |
 | Space | Play or pause |
 | Left / Right | Move five seconds |
+| Shift+Left / Shift+Right | Previous / next frame |
 | Mouse wheel over timeline | Zoom |
 | Delete | Remove the selected item or highlighted range |
 | Ctrl+Z | Undo |
@@ -86,7 +88,7 @@ Useful shortcuts:
 Install Node.js 22.22 or newer and npm 11.18, then run:
 
 ```bash
-npm install
+npm ci
 npm run dev
 ```
 
@@ -107,6 +109,14 @@ npm test
 ```
 
 This runs strict linting, type checking, unit and integration tests, maintainability checks, a production build, and real Electron GUI tests. GUI tests use a private headless GNOME session, so they do not show windows or steal focus from the desktop. Authored source files are limited to 500 lines and application functions must have a CRAP score of 30 or less.
+
+Before pushing, run the same clean dependency install, audit, and software-rendered test paths as GitHub Actions:
+
+```bash
+npm run verify:ci
+```
+
+Use `npm run test:ci` when dependencies are already installed and only the CI rendering path needs to be checked.
 
 ## Media and license
 

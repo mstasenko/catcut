@@ -11,6 +11,63 @@ beforeAll(async () => {
 })
 
 describe('FFmpeg export graph', () => {
+  it('holds freeze frames with silence and applies focus before overlays', () => {
+    const source = { path: '/v.mp4', name: 'v.mp4', size: 1, modifiedAt: 1, duration: 2, width: 320, height: 180, fps: 30, videoCodec: 'h264', audioCodec: 'aac', hasAudio: true, rotation: 0, pixelFormat: 'yuv420p' }
+    const graph = buildFilterGraph({ canvas: { width: 320, height: 180, fps: 30, fit: 'contain' }, sources: [{ id: 's', metadata: source }], outputPath: '/out.mp4', segments: [{ kind: 'freeze', id: 'f', sourceId: 's', sourceTime: 1, duration: 1 }], overlays: [], focusZooms: [{ id: 'z', start: 0, duration: 1, zoom: 1.5, focusX: 0.5, focusY: 0.5 }] }, []).graph
+    expect(graph).toContain("select='eq(n,0)',tpad=stop_mode=clone:stop_duration=1.000000")
+    expect(graph).toContain('anullsrc=channel_layout=stereo:sample_rate=48000:d=1.000000')
+    expect(graph).toContain('[basev]zoompan=')
+  })
+
+  it('exports every supported segment speed with matching video, audio, and silence timing', () => {
+    const source = { path: '/speed.mp4', name: 'speed.mp4', size: 1, modifiedAt: 1, duration: 10, width: 320, height: 180, fps: 30, videoCodec: 'h264', audioCodec: 'aac', hasAudio: true, rotation: 0, pixelFormat: 'yuv420p' }
+    const rates = [0.25, 0.5, 1, 2, 4] as const
+    const graph = buildFilterGraph({ canvas: { width: 320, height: 180, fps: 30, fit: 'contain' }, sources: [{ id: 's', metadata: source }], outputPath: '/speed.mp4', segments: rates.map((playbackRate, index) => ({ id: `s${index}`, sourceId: 's', sourceStart: 0, sourceEnd: 1, playbackRate })), overlays: [] }, []).graph
+    expect(graph).toContain('setpts=(PTS-STARTPTS)/0.25')
+    expect(graph).toContain('atempo=0.5,atempo=0.5')
+    expect(graph).toContain('setpts=(PTS-STARTPTS)/4')
+    expect(graph).toContain('atempo=2,atempo=2')
+  })
+
+  it('exports Replay through the existing half-speed segment path without another source', () => {
+    const source = { path: '/game.mp4', name: 'game.mp4', size: 1, modifiedAt: 1, duration: 4, width: 320, height: 180, fps: 30, videoCodec: 'h264', audioCodec: 'aac', hasAudio: true, rotation: 0, pixelFormat: 'yuv420p' }
+    const graph = buildFilterGraph({
+      canvas: { width: 320, height: 180, fps: 30, fit: 'contain' },
+      sources: [{ id: 'game', metadata: source }], outputPath: '/replay.mp4', overlays: [],
+      segments: [
+        { id: 'original', sourceId: 'game', sourceStart: 0, sourceEnd: 1 },
+        { id: 'replay', sourceId: 'game', sourceStart: 0, sourceEnd: 1, playbackRate: 0.5, replayGroupId: 'replay-one' }
+      ]
+    }, []).graph
+    expect(graph).toContain('[0:v:0]trim=start=0.000000:end=1.000000')
+    expect(graph).toContain('setpts=(PTS-STARTPTS)/0.5')
+    expect(graph).toContain('atempo=0.5')
+    expect(graph).not.toContain('[1:v:0]trim=')
+  })
+
+  it('animates only a prepared local text bitmap while None stays static', () => {
+    const source = { path: '/game.mp4', name: 'game.mp4', size: 1, modifiedAt: 1, duration: 3, width: 320, height: 180, fps: 30, videoCodec: 'h264', audioCodec: null, hasAudio: false, rotation: 0, pixelFormat: 'yuv420p' }
+    const text = {
+      id: 'text', type: 'text' as const, name: 'Title', start: 0.5, duration: 2, zIndex: 1,
+      x: 0.25, y: 0.25, width: 0.5, height: 0.2, opacity: 0.8, text: 'POP',
+      fontFamily: 'Anton', fontSize: 7, color: '#fff', outlineColor: '#000', outlineWidth: 2,
+      shadow: false, align: 'center' as const, animation: 'pop' as const,
+      renderedTextBitmap: { dataUrl: 'data:image/png;base64,AA==', x: 70, y: 35, width: 180, height: 70, anchorX: 160, anchorY: 63 }
+    }
+    const request: ExportRequest = {
+      canvas: { width: 320, height: 180, fps: 30, fit: 'contain' }, sources: [{ id: 'game', metadata: source }],
+      outputPath: '/text.mp4', segments: [{ id: 'game', sourceId: 'game', sourceStart: 0, sourceEnd: 3 }], overlays: [text]
+    }
+    const animated = buildFilterGraph(request, [{ overlay: text, index: 1 }]).graph
+    expect(animated).toContain("scale=w='max(2,2*round(iw*(")
+    expect(animated).toContain("geq=r='r(X,Y)'")
+    expect(animated).toContain("overlay=x='160-overlay_w/2")
+    const still = { ...text, animation: 'none' as const }
+    const staticGraph = buildFilterGraph({ ...request, overlays: [still] }, [{ overlay: still, index: 1 }]).graph
+    expect(staticGraph).toContain('overlay=x=70:y=35')
+    expect(staticGraph).not.toContain('eval=frame')
+  })
+
   it('builds retained segments, visual overlays, and equal audio mixing', () => {
     const overlays: Overlay[] = [
       {

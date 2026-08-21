@@ -68,6 +68,76 @@ describe('IPC input validation', () => {
     })).toThrow('unique')
   })
 
+  it('validates focus zooms and genuine freeze segments', () => {
+    const request = {
+      canvas: { width: 320, height: 180, fps: 24, fit: 'contain' },
+      sources: [{ id: 'source', metadata }], outputPath: '/edited.mp4', overlays: [],
+      segments: [{ kind: 'freeze', id: 'freeze', sourceId: 'source', sourceTime: 1, duration: 1, replayGroupId: 'replay-safe_1' }],
+      focusZooms: [{ id: 'zoom', start: 0, duration: 1, zoom: 1.5, focusX: 0.75, focusY: 0.25 }]
+    }
+    expect(parseExportRequest(request)).toEqual(request)
+    for (const zoom of [1.5, 2, 3, 4, 5, 6, 7, 8, 9, 10]) {
+      expect(parseExportRequest({ ...request, focusZooms: [{ ...request.focusZooms[0], zoom }] }).focusZooms?.[0]?.zoom).toBe(zoom)
+    }
+    expect(() => parseExportRequest({ ...request, segments: [{ ...request.segments[0], duration: 3 }] })).toThrow('Freeze duration')
+    expect(() => parseExportRequest({ ...request, segments: [{ ...request.segments[0], sourceTime: 4 }] })).toThrow('Freeze source time')
+    expect(() => parseExportRequest({ ...request, focusZooms: [{ ...request.focusZooms[0], zoom: 1.25 }] })).toThrow('amount')
+    expect(() => parseExportRequest({ ...request, focusZooms: [{ ...request.focusZooms[0], focusX: -1 }] })).toThrow('Focus x')
+    expect(() => parseExportRequest({ ...request, focusZooms: [request.focusZooms[0], { ...request.focusZooms[0], id: 'overlap' }] })).toThrow('overlap')
+    expect(() => parseExportRequest({ ...request, segments: [{ ...request.segments[0], replayGroupId: 'bad replay!' }] })).toThrow('Replay group ID')
+  })
+
+  it('validates text presets and prepared local bitmap geometry', () => {
+    const text = {
+      id: 'text', type: 'text', name: 'Title', start: 0, duration: 2, zIndex: 1,
+      x: 0.1, y: 0.1, width: 0.8, height: 0.2, opacity: 1, text: 'Hello',
+      fontFamily: 'Anton', fontSize: 7, color: '#fff', outlineColor: '#000',
+      outlineWidth: 2, shadow: false, align: 'center', animation: 'pop',
+      renderedTextBitmap: { dataUrl: 'data:image/png;base64,AA==', x: 20, y: 10, width: 200, height: 60, anchorX: 160, anchorY: 36 }
+    }
+    const request = {
+      canvas: { width: 320, height: 180, fps: 24, fit: 'contain' },
+      sources: [{ id: 'source', metadata }], outputPath: '/edited.mp4',
+      segments: [{ id: 'segment', sourceId: 'source', sourceStart: 0, sourceEnd: 3 }], overlays: [text]
+    }
+    for (const animation of ['none', 'pop', 'fade', 'bounce', 'shake']) {
+      expect(parseExportRequest({ ...request, overlays: [{ ...text, animation }] }).overlays[0]).toMatchObject({ animation })
+    }
+    expect(() => parseExportRequest({ ...request, overlays: [{ ...text, animation: 'spin' }] })).toThrow('Text animation')
+    expect(() => parseExportRequest({ ...request, overlays: [{ ...text, renderedTextBitmap: { ...text.renderedTextBitmap, anchorX: 999 } }] })).toThrow('anchor x')
+    expect(() => parseExportRequest({ ...request, overlays: [{ ...text, renderedTextBitmap: { ...text.renderedTextBitmap, dataUrl: 'bad' } }] })).toThrow('PNG')
+  })
+
+  it('validates optional fades, game sound levels, and boosted volume', () => {
+    const overlay = {
+      id: 'audio', type: 'audio', name: 'Boom', path: '/boom.wav', start: 0,
+      duration: 1, zIndex: 1, volume: 2, sourceIn: 0, sourceDuration: 1,
+      fadeIn: 0.25, fadeOut: 1, duckGameAudio: true, gameAudioLevel: 0.3
+    }
+    const request = {
+      canvas: { width: 320, height: 180, fps: 24, fit: 'contain' },
+      sources: [{ id: 'source', metadata }], outputPath: '/edited.mp4',
+      segments: [{ id: 'segment', sourceId: 'source', sourceStart: 0, sourceEnd: 3 }],
+      overlays: [overlay]
+    }
+    expect(parseExportRequest(request).overlays[0]).toEqual(overlay)
+    for (const fade of [0, 0.1, 0.25, 0.5, 1]) {
+      expect(() => parseExportRequest({ ...request, overlays: [{ ...overlay, fadeIn: fade }] })).not.toThrow()
+    }
+    for (const level of [0.5, 0.3, 0.15]) {
+      expect(() => parseExportRequest({ ...request, overlays: [{ ...overlay, gameAudioLevel: level }] })).not.toThrow()
+    }
+    expect(() => parseExportRequest({ ...request, overlays: [{ ...overlay, fadeOut: 0.2 }] })).toThrow('Fade out')
+    expect(() => parseExportRequest({ ...request, overlays: [{ ...overlay, gameAudioLevel: 0.2 }] })).toThrow('Game audio level')
+    expect(() => parseExportRequest({ ...request, overlays: [{ ...overlay, duckGameAudio: 'yes' }] })).toThrow('Lower game sound')
+    const silentVideo = {
+      id: 'silent', type: 'video', name: 'Silent', path: '/silent.mp4', start: 0, duration: 1,
+      zIndex: 2, x: 0, y: 0, width: 1, height: 1, opacity: 1, loop: false,
+      audioEnabled: true, hasAudio: false, volume: 1, sourceIn: 0, sourceDuration: 1
+    }
+    expect(() => parseExportRequest({ ...request, overlays: [silentVideo] })).toThrow('no audio stream')
+  })
+
   it('validates restorable editor state', () => {
     const saved = {
       canvas: { width: 320, height: 180, fps: 24, fit: 'contain' },

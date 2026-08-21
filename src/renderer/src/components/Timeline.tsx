@@ -5,15 +5,22 @@ import {
   deletionRange,
   formatTime,
   isSourceTimedOverlay,
+  isFreezeSegment,
   overlayAtTime,
   overlaySourceTime,
   positionAtOutputTime,
   sourceForSegment,
+  segmentOutputDuration,
   timelineDuration
 } from '../model/timeline'
 import { transitionPreviewAtOutputTime } from '../model/transitions'
+import { focusCameraTransformAtTime } from '../model/focus-zoom'
 import { waveformPath } from '../model/waveform'
 import { OutgoingTransitionVideo } from './TransitionPreview'
+import { replayRanges } from '../model/replay'
+import { textAnimationAtTime } from '../model/text-animation'
+import { effectiveFadeDurations, isAudioEnabledOverlay } from '@shared/audio-envelope'
+import { useMediaUrl } from './useMediaUrl'
 
 interface TimelineProps {
   session: EditSession
@@ -29,6 +36,42 @@ interface TimelineProps {
 
 const colors: Record<Overlay['type'], string> = {
   text: '#a477ff', image: '#47c6ff', gif: '#ff66c4', video: '#ff9c46', audio: '#57d987'
+}
+
+function textOverlayTitle(overlay: Extract<Overlay, { type: 'text' }>): string {
+  const animation = overlay.animation ?? 'none'
+  return animation === 'none'
+    ? overlay.name
+    : `${overlay.name} · ${animation[0]?.toUpperCase()}${animation.slice(1)}`
+}
+
+function fadeTitle(overlay: Extract<Overlay, { type: 'audio' | 'video' }>): string | null {
+  const fadeIn = overlay.fadeIn ?? 0
+  const fadeOut = overlay.fadeOut ?? 0
+  return fadeIn > 0 || fadeOut > 0 ? `Fade ${fadeIn}s / ${fadeOut}s` : null
+}
+
+function duckTitle(overlay: Extract<Overlay, { type: 'audio' | 'video' }>): string | null {
+  if (!overlay.duckGameAudio) return null
+  return `lowers game sound to ${Math.round((overlay.gameAudioLevel ?? 0.3) * 100)}%`
+}
+
+function overlayTitle(overlay: Overlay): string {
+  if (overlay.type === 'text') return textOverlayTitle(overlay)
+  if (!isAudioEnabledOverlay(overlay)) return overlay.name
+  const details = [fadeTitle(overlay), duckTitle(overlay)].filter((detail): detail is string => detail !== null)
+  return details.length > 0 ? `${overlay.name} · ${details.join(' · ')}` : overlay.name
+}
+
+function AudioTimelineFeedback({ overlay }: { overlay: Overlay }): React.JSX.Element | null {
+  if (!isAudioEnabledOverlay(overlay)) return null
+  const fades = effectiveFadeDurations(overlay.duration, overlay.fadeIn, overlay.fadeOut)
+  const width = (fade: number): string => `${Math.min(35, fade / overlay.duration * 100)}%`
+  return <>
+    {fades.fadeIn > 0 && <span className="overlay-fade overlay-fade-in" style={{ width: width(fades.fadeIn) }} />}
+    {fades.fadeOut > 0 && <span className="overlay-fade overlay-fade-out" style={{ width: width(fades.fadeOut) }} />}
+    {overlay.duckGameAudio && <span className="game-sound-badge" aria-hidden="true">↓</span>}
+  </>
 }
 
 function percentage(value: number, duration: number): number {
@@ -85,18 +128,6 @@ function imageSource(overlay: Extract<Overlay, { type: 'image' }>, url: string):
   return overlay.renderedImageDataUrl ?? url
 }
 
-function useTimelineMediaUrl(path?: string): string {
-  const [url, setUrl] = useState('')
-  useEffect(() => {
-    let active = true
-    setUrl('')
-    if (!path) return
-    void window.catcut.getPathUrl(path).then((value) => { if (active) setUrl(value) })
-    return () => { active = false }
-  }, [path])
-  return url
-}
-
 function overlayStyle(overlay: Exclude<Overlay, { type: 'audio' }>, frameHeight: number): React.CSSProperties {
   return {
     left: `${overlay.x * 100}%`,
@@ -120,45 +151,22 @@ function overlayStyle(overlay: Exclude<Overlay, { type: 'audio' }>, frameHeight:
   }
 }
 
-function seekTimelineOverlay(media: HTMLVideoElement, sourceTime: number): void {
-  if (media.readyState >= 1) media.currentTime = sourceTime
-}
-
-function useTimelineOverlaySeek(
+function useVideoSeek(
   mediaRef: React.RefObject<HTMLVideoElement | null>,
-  overlay: Exclude<Overlay, { type: 'audio' }>,
   sourceTime: number,
-  url: string
+  sourceKey: string,
+  enabled = true
 ): void {
   useEffect(() => {
     const media = mediaRef.current
-    if (!media) return
-    if (!url) return
-    if (!isSourceTimedOverlay(overlay)) return
-    const seek = (): void => seekTimelineOverlay(media, sourceTime)
+    if (!media || !sourceKey || !enabled) return
+    const seek = (): void => { media.currentTime = sourceTime }
     if (media.readyState >= 1) seek()
     else {
       media.addEventListener('loadedmetadata', seek, { once: true })
       return () => media.removeEventListener('loadedmetadata', seek)
     }
-  }, [mediaRef, overlay, sourceTime, url])
-}
-
-function useVideoFrame(
-  videoRef: React.RefObject<HTMLVideoElement | null>,
-  path: string,
-  sourceTime: number
-): void {
-  useEffect(() => {
-    const video = videoRef.current
-    if (!video || !path) return
-    const seek = (): void => { video.currentTime = sourceTime }
-    if (video.readyState >= 1) seek()
-    else {
-      video.addEventListener('loadedmetadata', seek, { once: true })
-      return () => video.removeEventListener('loadedmetadata', seek)
-    }
-  }, [path, sourceTime, videoRef])
+  }, [enabled, mediaRef, sourceKey, sourceTime])
 }
 
 function TimelineOverlay({ overlay, outputTime, frameHeight }: {
@@ -167,13 +175,16 @@ function TimelineOverlay({ overlay, outputTime, frameHeight }: {
   frameHeight: number
 }): React.JSX.Element {
   const mediaRef = useRef<HTMLVideoElement>(null)
-  const url = useTimelineMediaUrl(overlayPath(overlay) || undefined)
+  const url = useMediaUrl(overlayPath(overlay) || undefined)
   const sourceTime = isSourceTimedOverlay(overlay) ? overlaySourceTime(overlay, outputTime) : 0
-  useTimelineOverlaySeek(mediaRef, overlay, sourceTime, url)
+  useVideoSeek(mediaRef, sourceTime, url, isSourceTimedOverlay(overlay))
 
   const style = overlayStyle(overlay, frameHeight)
   if (overlay.type === 'text') {
-    return <div className="timeline-hover-overlay timeline-hover-text" style={style} aria-label={overlay.name}>{overlay.text}</div>
+    const animation = textAnimationAtTime(overlay.animation, outputTime - overlay.start, overlay.duration)
+    return <div className="timeline-hover-overlay" style={style} aria-label={overlay.name}>
+      <div className="timeline-hover-text timeline-hover-text-animation" style={{ opacity: animation.opacity, transform: `translate(${animation.translateX * 100}%, ${animation.translateY * 100}%) scale(${animation.scale})` }}>{overlay.text}</div>
+    </div>
   }
   if (overlay.type === 'image') {
     return <div className="timeline-hover-overlay" style={style} aria-label={overlay.name}><img src={imageSource(overlay, url)} alt="" /></div>
@@ -191,8 +202,9 @@ function TimelineHoverFrame({ session, preview }: { session: EditSession; previe
   const overlays = session.overlays
     .filter((overlay): overlay is Exclude<Overlay, { type: 'audio' }> => overlay.type !== 'audio' && overlayAtTime(overlay, preview.outputTime))
     .sort((left, right) => left.zIndex - right.zIndex)
+  const focusTransform = focusCameraTransformAtTime(session.focusZooms, preview.outputTime)
 
-  useVideoFrame(previewVideo, preview.path, preview.sourceTime)
+  useVideoSeek(previewVideo, preview.sourceTime, preview.path)
 
   return (
     <div
@@ -200,19 +212,60 @@ function TimelineHoverFrame({ session, preview }: { session: EditSession; previe
       style={{ width: preview.frameWidth, height: preview.frameHeight }}
       aria-label={`Frame at ${formatTime(preview.outputTime, session.canvas.fps)}`}
     >
-      <OutgoingTransitionVideo preview={transitionPreview} fit={session.canvas.fit} />
-      <video
-        ref={previewVideo}
-        src={preview.path}
-        muted
-        preload="auto"
-        playsInline
-        style={{ objectFit: session.canvas.fit, ...transitionPreview?.styles.current }}
-        data-transition={transitionPreview?.active.effect}
-      />
+      <div className="timeline-hover-camera" style={{ transform: focusTransform }}>
+        <OutgoingTransitionVideo preview={transitionPreview} fit={session.canvas.fit} />
+        <video
+          ref={previewVideo}
+          src={preview.path}
+          muted
+          preload="auto"
+          playsInline
+          style={{ objectFit: session.canvas.fit, ...transitionPreview?.styles.current }}
+          data-transition={transitionPreview?.active.effect}
+        />
+      </div>
       {overlays.map((overlay) => <TimelineOverlay key={overlay.id} overlay={overlay} outputTime={preview.outputTime} frameHeight={preview.frameHeight} />)}
     </div>
   )
+}
+
+function segmentTitle(segment: EditSession['segments'][number], name: string): string {
+  const replay = segment.replayGroupId ? ' · Replay ½×' : ''
+  if (isFreezeSegment(segment) || !segment.transition) return `${name}${replay}`
+  return `${name}${replay} · ${segment.transition.effect} ${segment.transition.duration}s`
+}
+
+function speedLabel(speed: import('@shared/types').VideoSpeed | undefined): string | null {
+  if (!speed || speed === 1) return null
+  return speed === 0.25 ? '¼×' : speed === 0.5 ? '½×' : `${speed}×`
+}
+
+function TimelineSegmentVisual({ session, segment }: { session: EditSession; segment: EditSession['segments'][number] }): React.JSX.Element {
+  const source = sourceForSegment(session, segment)
+  return isFreezeSegment(segment)
+    ? <span className="freeze-badge">❄ {segment.duration}s</span>
+    : <svg className="waveform" viewBox="0 0 100 40" preserveAspectRatio="none" aria-label="Audio waveform"><path d={waveformPath(source?.waveform ?? [], segment.sourceStart, segment.sourceEnd, source?.metadata.duration ?? 0)} /></svg>
+}
+
+function SpeedBadge({ segment }: { segment: EditSession['segments'][number] }): React.JSX.Element | null {
+  const speed = speedLabel(isFreezeSegment(segment) ? undefined : segment.playbackRate)
+  return speed ? <span className="speed-badge">{speed}</span> : null
+}
+
+function TimelineSegmentContent({ session, segment }: { session: EditSession; segment: EditSession['segments'][number] }): React.JSX.Element {
+  return <><TimelineSegmentVisual session={session} segment={segment} /><SpeedBadge segment={segment} /></>
+}
+
+function TimelineVideoSegment({ session, segment, duration }: { session: EditSession; segment: EditSession['segments'][number]; duration: number }): React.JSX.Element {
+  const source = sourceForSegment(session, segment)
+  return <div
+    className={`source-segment ${isFreezeSegment(segment) ? 'freeze-segment' : ''}`}
+    data-transition={isFreezeSegment(segment) ? undefined : segment.transition?.effect}
+    style={{ width: `${(segmentOutputDuration(segment) / duration) * 100}%` }}
+    title={segmentTitle(segment, source?.metadata.name ?? 'Video')}
+  >
+    <TimelineSegmentContent session={session} segment={segment} />
+  </div>
 }
 
 export function Timeline({
@@ -223,6 +276,7 @@ export function Timeline({
   const width = Math.max(100, zoom * 100)
   const selection = deletionRange(session)
   const markers = session.cutPoints
+  const replays = replayRanges(session.segments)
   const [hoverPreview, setHoverPreview] = useState<HoverPreview | null>(null)
 
   const pointerToTime = (event: React.PointerEvent<HTMLDivElement>): number => {
@@ -270,20 +324,9 @@ export function Timeline({
           onPointerLeave={() => setHoverPreview(null)}
         >
           <div className="video-track">
-            {session.segments.map((segment) => {
-              const source = sourceForSegment(session, segment)
-              return <div
-                key={segment.id}
-                className="source-segment"
-                data-transition={segment.transition?.effect}
-                style={{ width: `${((segment.sourceEnd - segment.sourceStart) / duration) * 100}%` }}
-                title={`${source?.metadata.name ?? 'Video'}${segment.transition ? ` · ${segment.transition.effect} ${segment.transition.duration}s` : ''}`}
-              >
-                <svg className="waveform" viewBox="0 0 100 40" preserveAspectRatio="none" aria-label="Audio waveform">
-                  <path d={waveformPath(source?.waveform ?? [], segment.sourceStart, segment.sourceEnd, source?.metadata.duration ?? 0)} />
-                </svg>
-              </div>
-            })}
+            {session.segments.map((segment) => <TimelineVideoSegment key={segment.id} session={session} segment={segment} duration={duration} />)}
+            {session.focusZooms.map((effect) => <div key={effect.id} className="focus-zoom-range" style={{ left: `${percentage(effect.start, duration)}%`, width: `${percentage(effect.duration, duration)}%` }}><span>{effect.zoom}×</span></div>)}
+            {replays.map((replay) => <div key={`${replay.groupId}-${replay.start}`} className="replay-range" style={{ left: `${percentage(replay.start, duration)}%`, width: `${percentage(replay.duration, duration)}%` }}><span>Replay</span></div>)}
           </div>
           <div className="overlay-track">
             {session.overlays.map((overlay) => (
@@ -325,8 +368,9 @@ export function Timeline({
                   window.addEventListener('pointerup', up)
                   window.addEventListener('pointercancel', cancel)
                 }}
-                title={overlay.name}
+                title={overlayTitle(overlay)}
               >
+                <AudioTimelineFeedback overlay={overlay} />
                 {overlay.name}
               </button>
             ))}

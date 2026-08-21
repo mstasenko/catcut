@@ -1,6 +1,6 @@
 import type {
   EditSession,
-  InsertTransitions,
+  FocusZoomEffect,
   MediaMetadata,
   Overlay,
   SourceSegment,
@@ -8,6 +8,10 @@ import type {
   TextOverlay,
   VideoTransition
 } from '@shared/types'
+import { timedRangesAfterInsertion } from './timed-ranges'
+import { isFreezeSegment, segmentOutputDuration, segmentPlaybackRate, segmentSourceDuration } from '@shared/segment-time'
+
+export { isFreezeSegment, segmentOutputDuration, segmentPlaybackRate, segmentSourceDuration } from '@shared/segment-time'
 
 const EPSILON = 0.0001
 
@@ -19,8 +23,10 @@ export function clamp(value: number, minimum: number, maximum: number): number {
   return Math.min(maximum, Math.max(minimum, value))
 }
 
+export function segmentSourceStart(segment: SourceSegment): number { return isFreezeSegment(segment) ? segment.sourceTime : segment.sourceStart }
+export function segmentSourceEnd(segment: SourceSegment): number { return isFreezeSegment(segment) ? segment.sourceTime : segment.sourceEnd }
 export function timelineDuration(segments: SourceSegment[]): number {
-  return segments.reduce((total, segment) => total + segment.sourceEnd - segment.sourceStart, 0)
+  return segments.reduce((total, segment) => total + segmentOutputDuration(segment), 0)
 }
 
 export function createSession(source: MediaMetadata, short = false): EditSession {
@@ -39,7 +45,8 @@ export function createSession(source: MediaMetadata, short = false): EditSession
     selectedOverlayId: null,
     playhead: 0,
     cutPoints: [],
-    dirty: false
+    dirty: false,
+    focusZooms: []
   }
 }
 
@@ -72,17 +79,19 @@ export function positionAtOutputTime(
   for (let index = 0; index < segments.length; index += 1) {
     const segment = segments[index]
     if (!segment) continue
-    const segmentDuration = segment.sourceEnd - segment.sourceStart
+    const segmentDuration = segmentOutputDuration(segment)
     const isLast = index === segments.length - 1
     if (safeTime < outputStart + segmentDuration || isLast) {
+      const sourceOffset = isFreezeSegment(segment) ? 0 : (safeTime - outputStart) * segmentPlaybackRate(segment)
+      const sourceStart = segmentSourceStart(segment)
       return {
         segmentIndex: index,
         segment,
         outputStart,
         sourceTime: clamp(
-          segment.sourceStart + safeTime - outputStart,
-          segment.sourceStart,
-          segment.sourceEnd
+          sourceStart + sourceOffset,
+          sourceStart,
+          segmentSourceEnd(segment)
         )
       }
     }
@@ -99,7 +108,9 @@ export function outputTimeForSource(
   const before = timelineDuration(segments.slice(0, segmentIndex))
   const segment = segments[segmentIndex]
   if (!segment) return before
-  return before + clamp(sourceTime - segment.sourceStart, 0, segment.sourceEnd - segment.sourceStart)
+  if (isFreezeSegment(segment)) return before
+  return before + clamp(sourceTime - segment.sourceStart, 0, segmentSourceDuration(segment)) /
+    segmentPlaybackRate(segment)
 }
 
 type SourceTimedOverlay = Extract<Overlay, { type: 'audio' | 'video' | 'gif' }>
@@ -172,23 +183,31 @@ export function removeOutputRange(
   const output: SourceSegment[] = []
   let outputCursor = 0
   for (const segment of segments) {
-    const segmentDuration = segment.sourceEnd - segment.sourceStart
+    const segmentDuration = segmentOutputDuration(segment)
     const segmentOutputEnd = outputCursor + segmentDuration
     const keepBefore = clamp(start - outputCursor, 0, segmentDuration)
     const keepAfter = clamp(segmentOutputEnd - end, 0, segmentDuration)
+    const rate = segmentPlaybackRate(segment)
+
+    if (isFreezeSegment(segment)) {
+      const keptDuration = keepBefore + keepAfter
+      if (keptDuration > EPSILON) output.push({ ...segment, id: makeId('freeze'), duration: keptDuration })
+      outputCursor = segmentOutputEnd
+      continue
+    }
 
     if (keepBefore > EPSILON) {
       output.push({
         ...segment,
         id: makeId('segment'),
-        sourceEnd: segment.sourceStart + keepBefore
+        sourceEnd: segment.sourceStart + keepBefore * rate
       })
     }
     if (keepAfter > EPSILON) {
       output.push(withTransition({
         ...segment,
         id: makeId('segment'),
-        sourceStart: segment.sourceEnd - keepAfter,
+        sourceStart: segment.sourceEnd - keepAfter * rate,
         sourceEnd: segment.sourceEnd
       }, keepAfter >= segmentDuration - EPSILON ? segment.transition : undefined))
     }
@@ -211,13 +230,14 @@ function fittedTransition(
   return { ...transition, duration: Math.min(transition.duration, segmentDuration, 5) }
 }
 
-function withTransition(
+export function withTransition(
   segment: SourceSegment,
   transition?: VideoTransition
 ): SourceSegment {
+  if (isFreezeSegment(segment)) return segment
   const plainSegment = { ...segment }
   delete plainSegment.transition
-  const fitted = fittedTransition(transition, segment.sourceEnd - segment.sourceStart)
+  const fitted = fittedTransition(transition, segmentOutputDuration(segment))
   return fitted ? { ...plainSegment, transition: fitted } : plainSegment
 }
 
@@ -240,63 +260,35 @@ function overlaysAfterInsertion(overlays: Overlay[], point: number, duration: nu
   })
 }
 
-export function insertSourceAtOutputTime(
-  session: EditSession,
-  source: TimelineSource,
-  rawPoint: number,
-  transitions: InsertTransitions = {}
-): EditSession {
-  const total = timelineDuration(session.segments)
-  const point = clamp(rawPoint, 0, total)
-  const inserted: SourceSegment = {
-    id: makeId('segment'),
-    sourceId: source.id,
-    sourceStart: 0,
-    sourceEnd: source.metadata.duration
-  }
-  const segments: SourceSegment[] = []
-  let cursor = 0
-  let didInsert = false
+function focusZoomsAroundGap(effects: FocusZoomEffect[], point: number, duration: number): FocusZoomEffect[] {
+  return effects.flatMap((effect) => {
+    const end = effect.start + effect.duration
+    if (end <= point + EPSILON) return [effect]
+    if (effect.start >= point - EPSILON) return [{ ...effect, start: effect.start + duration }]
+    return [
+      { ...effect, duration: point - effect.start },
+      { ...effect, id: makeId('zoom'), start: point + duration, duration: end - point }
+    ]
+  })
+}
 
-  for (const segment of session.segments) {
-    const segmentDuration = segment.sourceEnd - segment.sourceStart
-    const offset = point - cursor
-    if (!didInsert && offset <= EPSILON) {
-      segments.push(
-        withTransition(inserted, segments.length > 0 ? transitions.into : undefined),
-        withTransition(segment, transitions.back)
-      )
-      didInsert = true
-      cursor += segmentDuration
-      continue
-    } else if (!didInsert && offset < segmentDuration - EPSILON) {
-      segments.push(
-        { ...segment, id: makeId('segment'), sourceEnd: segment.sourceStart + offset },
-        withTransition(inserted, transitions.into),
-        withTransition(
-          { ...segment, id: makeId('segment'), sourceStart: segment.sourceStart + offset },
-          transitions.back
-        )
-      )
-      didInsert = true
-      cursor += segmentDuration
-      continue
-    }
-    segments.push(segment)
-    cursor += segmentDuration
-  }
-  if (!didInsert) segments.push(withTransition(inserted, segments.length > 0 ? transitions.into : undefined))
+export function normalizedCutPoints(points: number[], total: number): number[] {
+  const sorted = points.filter((point) => point > EPSILON && point < total - EPSILON).sort((left, right) => left - right)
+  return sorted.filter((point, index) => index === 0 || Math.abs(point - (sorted[index - 1] ?? 0)) > EPSILON)
+}
 
+/** Ripple output-timed edits around inserted base media. Replay excludes the new gap from camera effects. */
+export function insertOutputGap(session: EditSession, point: number, duration: number, excludeFocusGap = false): EditSession {
+  const total = timelineDuration(session.segments) + duration
   return {
     ...session,
-    sources: [...session.sources, source],
-    segments,
-    overlays: overlaysAfterInsertion(session.overlays, point, source.metadata.duration),
-    cutPoints: session.cutPoints.map((cutPoint) => cutPoint > point + EPSILON
-      ? cutPoint + source.metadata.duration
-      : cutPoint),
-    selectedOverlayId: null,
-    playhead: point
+    overlays: overlaysAfterInsertion(session.overlays, point, duration),
+    focusZooms: excludeFocusGap
+      ? focusZoomsAroundGap(session.focusZooms, point, duration)
+      : timedRangesAfterInsertion(session.focusZooms, point, duration),
+    cutPoints: normalizedCutPoints(session.cutPoints.map((cutPoint) =>
+      cutPoint > point + EPSILON ? cutPoint + duration : cutPoint
+    ), total)
   }
 }
 
@@ -319,15 +311,16 @@ export function cutPointsAfterRemoval(
   end: number,
   duration: number
 ): number[] {
-  const removed = end - start
   // Points inside a removed partition collapse onto its join. Deduplication leaves
   // one useful divider there while endpoint filtering avoids zero-length ranges.
-  const shifted = points.map((point) => {
-    if (point < start) return point
-    if (point > end) return point - removed
-    return start
-  }).filter((point) => point > EPSILON && point < duration - EPSILON)
+  const shifted = points.map((point) => timeAfterOutputRemoval(point, start, end))
+    .filter((point) => point > EPSILON && point < duration - EPSILON)
   return [...new Set(shifted)].sort((left, right) => left - right)
+}
+
+export function timeAfterOutputRemoval(time: number, start: number, end: number): number {
+  if (time <= start) return time
+  return time <= end ? start : time - (end - start)
 }
 
 export function defaultTextOverlay(start: number, zIndex: number): TextOverlay {
@@ -382,3 +375,5 @@ export function formatTime(seconds: number, framesPerSecond = 30): string {
   const frames = Math.min(fps - 1, Math.floor((safe - Math.floor(safe)) * fps))
   return `${hours ? `${hours}:` : ''}${String(minutes).padStart(2, '0')}:${String(remainder).padStart(2, '0')}.${String(frames).padStart(2, '0')}`
 }
+
+export { applySpeedToOutputRange } from './speed'

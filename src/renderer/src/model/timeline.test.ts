@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { MediaMetadata, Overlay, SourceSegment } from '@shared/types'
+import type { MediaMetadata, Overlay, SourceSegment, VideoSegment } from '@shared/types'
 import {
   clamp,
   createSession,
@@ -7,21 +7,30 @@ import {
   deletionRange,
   defaultTextOverlay,
   formatTime,
-  insertSourceAtOutputTime,
   isSourceTimedOverlay,
   overlaySourceTime,
   outputTimeForSource,
   overlayAtTime,
   positionAtOutputTime,
   removeOutputRange,
+  segmentPlaybackRate,
   snapTime,
+  segmentSourceDuration,
+  segmentOutputDuration,
   timelineDuration
 } from './timeline'
+import { insertSourceAtOutputTime } from './segment-ranges'
+import { applySpeedToOutputRange } from './speed'
 
 const source: MediaMetadata = {
   path: '/video.mp4', name: 'video.mp4', size: 100, modifiedAt: 1, duration: 20,
   width: 1920, height: 1080, fps: 30, videoCodec: 'h264', audioCodec: 'aac',
   hasAudio: true, rotation: 0, pixelFormat: 'yuv420p'
+}
+
+function video(segment: SourceSegment | undefined): VideoSegment {
+  if (!segment || segment.kind === 'freeze') throw new Error('video segment missing')
+  return segment
 }
 
 describe('timeline model', () => {
@@ -41,6 +50,10 @@ describe('timeline model', () => {
     const session = createSession(source)
     const originalSourceId = session.sources[0]?.id
     session.cutPoints = [2, 8]
+    session.focusZooms = [
+      { id: 'spans', start: 4, duration: 3, zoom: 1.5, focusX: 0.5, focusY: 0.5 },
+      { id: 'after', start: 9, duration: 1, zoom: 2, focusX: 0.5, focusY: 0.5 }
+    ]
     session.overlays = [
       { ...defaultTextOverlay(3, 1), id: 'text', duration: 4 },
       {
@@ -56,7 +69,7 @@ describe('timeline model', () => {
       back: { effect: 'circleopen', duration: 0.75 }
     })
 
-    expect(result.segments.map(({ sourceId, sourceStart, sourceEnd }) => ({ sourceId, sourceStart, sourceEnd }))).toEqual([
+    expect(result.segments.map((segment) => { const item = video(segment); return { sourceId: item.sourceId, sourceStart: item.sourceStart, sourceEnd: item.sourceEnd } })).toEqual([
       { sourceId: originalSourceId, sourceStart: 0, sourceEnd: 5 },
       { sourceId: 'inserted', sourceStart: 0, sourceEnd: 4 },
       { sourceId: originalSourceId, sourceStart: 5, sourceEnd: 20 }
@@ -69,8 +82,11 @@ describe('timeline model', () => {
       { type: 'audio', start: 9, duration: 2 }
     ])
     expect(result.overlays[3]).toMatchObject({ sourceIn: 4 })
-    expect(result.segments[1]?.transition).toEqual({ effect: 'wipeleft', duration: 0.5 })
-    expect(result.segments[2]?.transition).toEqual({ effect: 'circleopen', duration: 0.75 })
+    expect(result.focusZooms.map(({ id, start, duration }) => ({ id, start, duration }))).toEqual([
+      { id: 'spans', start: 4, duration: 7 }, { id: 'after', start: 13, duration: 1 }
+    ])
+    expect(video(result.segments[1]).transition).toEqual({ effect: 'wipeleft', duration: 0.5 })
+    expect(video(result.segments[2]).transition).toEqual({ effect: 'circleopen', duration: 0.75 })
     expect(result.playhead).toBe(5)
   })
 
@@ -84,11 +100,11 @@ describe('timeline model', () => {
     }
     const atStart = insertSourceAtOutputTime(createSession(source), inserted, -1, transitions)
     expect(atStart.segments.map((segment) => segment.sourceId)).toEqual(['inserted', atStart.sources[0]?.id])
-    expect(atStart.segments[0]?.transition).toBeUndefined()
-    expect(atStart.segments[1]?.transition).toEqual({ effect: 'hblur', duration: 1 })
+    expect(video(atStart.segments[0]).transition).toBeUndefined()
+    expect(video(atStart.segments[1]).transition).toEqual({ effect: 'hblur', duration: 1 })
     const atEnd = insertSourceAtOutputTime(createSession(source), inserted, 999, transitions)
     expect(atEnd.segments.map((segment) => segment.sourceId)).toEqual([atEnd.sources[0]?.id, 'inserted'])
-    expect(atEnd.segments[1]?.transition).toEqual({ effect: 'fade', duration: 2 })
+    expect(video(atEnd.segments[1]).transition).toEqual({ effect: 'fade', duration: 2 })
 
     const tiny = {
       ...inserted,
@@ -96,7 +112,7 @@ describe('timeline model', () => {
       metadata: { ...inserted.metadata, duration: 0.02 }
     }
     const withTinyClip = insertSourceAtOutputTime(createSession(source), tiny, 10, transitions)
-    expect(withTinyClip.segments[1]?.transition).toBeUndefined()
+    expect(video(withTinyClip.segments[1]).transition).toBeUndefined()
   })
 
   it('maps output positions across retained source segments', () => {
@@ -111,6 +127,98 @@ describe('timeline model', () => {
     expect(positionAtOutputTime([], 0)).toBeNull()
     expect(outputTimeForSource(segments, 1, 12)).toBe(5)
     expect(outputTimeForSource(segments, 9, 2)).toBe(7)
+  })
+
+  it('uses playback rate for source and output durations and mappings', () => {
+    const segments: SourceSegment[] = [
+      { id: 'fast', sourceId: 'source', sourceStart: 0, sourceEnd: 8, playbackRate: 2 },
+      { id: 'slow', sourceId: 'source', sourceStart: 8, sourceEnd: 12, playbackRate: 0.5 }
+    ]
+    const fast = segments[0]
+    const slow = segments[1]
+    if (!fast || !slow) throw new Error('test segments missing')
+    expect(segmentSourceDuration(fast)).toBe(8)
+    expect(segmentPlaybackRate(fast)).toBe(2)
+    expect(segmentOutputDuration(fast)).toBe(4)
+    expect(segmentOutputDuration(slow)).toBe(8)
+    expect(timelineDuration(segments)).toBe(12)
+    expect(positionAtOutputTime(segments, 2)).toMatchObject({ segmentIndex: 0, sourceTime: 4 })
+    expect(positionAtOutputTime(segments, 4)).toMatchObject({ segmentIndex: 1, sourceTime: 8 })
+    expect(positionAtOutputTime(segments, 8)).toMatchObject({ segmentIndex: 1, sourceTime: 10 })
+    expect(outputTimeForSource(segments, 1, 10)).toBe(8)
+  })
+
+  it('applies speed to a selected output range without mutating segments', () => {
+    const session = createSession(source)
+    session.segments = [{
+      id: 'source', sourceId: 'source', sourceStart: 0, sourceEnd: 10,
+      transition: { effect: 'fade', duration: 0.5 }
+    }]
+    const result = applySpeedToOutputRange(session, 2, 6, 2)
+    expect(session.segments[0]).not.toHaveProperty('playbackRate')
+    expect(result.segments.map((segment) => { const item = video(segment); return {
+      sourceStart: item.sourceStart, sourceEnd: item.sourceEnd, playbackRate: item.playbackRate
+    } })).toEqual([
+      { sourceStart: 0, sourceEnd: 2, playbackRate: undefined },
+      { sourceStart: 2, sourceEnd: 6, playbackRate: 2 },
+      { sourceStart: 6, sourceEnd: 10, playbackRate: undefined }
+    ])
+    expect(video(result.segments[0]).transition).toEqual({ effect: 'fade', duration: 0.5 })
+    expect(video(result.segments[1]).transition).toBeUndefined()
+    expect(video(result.segments[2]).transition).toBeUndefined()
+    expect(timelineDuration(result.segments)).toBe(8)
+    expect(applySpeedToOutputRange(session, 0, 10, 1)).toEqual(session)
+  })
+
+  it('ripples speed changes through a session while keeping attached timing', () => {
+    const session = createSession(source)
+    session.segments[0] = { id: 'source', sourceId: session.segments[0]?.sourceId ?? 'source', sourceStart: 0, sourceEnd: 10 }
+    session.playhead = 3
+    session.cutPoints = [2, 8]
+    session.focusZooms = [{ id: 'zoom', start: 3, duration: 2, zoom: 1.5, focusX: 0.5, focusY: 0.5 }]
+    session.overlays = [{ id: 'text', type: 'text', name: 't', start: 9, duration: 1, zIndex: 1, x: 0, y: 0, width: 1, height: 1, opacity: 1, text: 'x', fontFamily: 'sans', fontSize: 4, color: '#fff', outlineColor: '#000', outlineWidth: 0, shadow: false, align: 'center' }]
+    const changed = applySpeedToOutputRange(session, 2, 6, 0.5)
+    expect(timelineDuration(changed.segments)).toBe(14)
+    expect(changed.cutPoints).toEqual([2, 12])
+    expect(changed.overlays[0]?.start).toBe(13)
+    expect(changed.playhead).toBe(4)
+    expect(changed.focusZooms[0]).toMatchObject({ start: 4, duration: 4 })
+    expect(applySpeedToOutputRange(session, 4, 4, 2)).toBe(session)
+  })
+
+  it('resets whole slowed sections while leaving freezes unchanged', () => {
+    const session = createSession(source)
+    const original = session.segments[0]
+    if (!original || original.kind === 'freeze') throw new Error('video segment missing')
+    session.segments = [
+      { ...original, playbackRate: 0.5 },
+      { kind: 'freeze', id: 'freeze', sourceId: original.sourceId, sourceTime: 20, duration: 1 }
+    ]
+    const reset = applySpeedToOutputRange(session, 0, 41, 1)
+    expect(video(reset.segments[0]).playbackRate).toBeUndefined()
+    expect(reset.segments[1]).toEqual(session.segments[1])
+    expect(reset.focusZooms).toEqual([])
+  })
+
+  it('cuts and inserts at speed-adjusted output positions', () => {
+    const session = createSession(source)
+    const original = session.segments[0]
+    if (!original || original.kind === 'freeze') throw new Error('test segment missing')
+    session.segments[0] = { ...original, playbackRate: 2 }
+    const insertedMetadata = { ...source, path: '/inserted-speed.mp4', name: 'inserted-speed.mp4', duration: 4 }
+    const inserted = insertSourceAtOutputTime(session, {
+      id: 'inserted', metadata: insertedMetadata, playbackPath: '/inserted-speed.mp4', waveform: []
+    }, 1)
+    expect(inserted.segments.map((segment) => { const item = video(segment); return { sourceId: item.sourceId, sourceStart: item.sourceStart, sourceEnd: item.sourceEnd } })).toEqual([
+      { sourceId: original.sourceId, sourceStart: 0, sourceEnd: 2 },
+      { sourceId: 'inserted', sourceStart: 0, sourceEnd: 4 },
+      { sourceId: original.sourceId, sourceStart: 2, sourceEnd: 20 }
+    ])
+    expect(timelineDuration(inserted.segments)).toBe(14)
+
+    const removed = removeOutputRange(session.segments, [], 1, 2)
+    expect(removed.segments.map((segment) => [video(segment).sourceStart, video(segment).sourceEnd])).toEqual([[0, 2], [4, 20]])
+    expect(timelineDuration(removed.segments)).toBe(9)
   })
 
   it('derives the partition containing the playhead from any number of cut points', () => {
@@ -140,8 +248,8 @@ describe('timeline model', () => {
       { id: 'b', sourceId: 'source', sourceStart: 10, sourceEnd: 15, transition: { effect: 'wipeleft', duration: 1 } }
     ]
     const result = removeOutputRange(segments, [], 3, 7)
-    expect(result.segments.map(({ sourceStart, sourceEnd }) => [sourceStart, sourceEnd])).toEqual([[0, 3], [12, 15]])
-    expect(result.segments.every((segment) => segment.transition === undefined)).toBe(true)
+    expect(result.segments.map((segment) => [video(segment).sourceStart, video(segment).sourceEnd])).toEqual([[0, 3], [12, 15]])
+    expect(result.segments.every((segment) => video(segment).transition === undefined)).toBe(true)
     expect(timelineDuration(result.segments)).toBe(6)
   })
 
@@ -152,9 +260,9 @@ describe('timeline model', () => {
       { id: 'c', sourceId: 'source', sourceStart: 4, sourceEnd: 6, transition: { effect: 'hblur', duration: 0.5 } }
     ]
     const result = removeOutputRange(segments, [], 0, 1)
-    expect(result.segments[0]?.transition).toBeUndefined()
-    expect(result.segments[1]?.transition).toEqual({ effect: 'fade', duration: 0.5 })
-    expect(result.segments[2]?.transition).toEqual({ effect: 'hblur', duration: 0.5 })
+    expect(video(result.segments[0]).transition).toBeUndefined()
+    expect(video(result.segments[1]).transition).toEqual({ effect: 'fade', duration: 0.5 })
+    expect(video(result.segments[2]).transition).toEqual({ effect: 'hblur', duration: 0.5 })
   })
 
   it('trims, removes, and shifts overlays with deleted video', () => {

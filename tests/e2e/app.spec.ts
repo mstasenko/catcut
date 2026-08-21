@@ -49,7 +49,7 @@ test('opens, edits, and exports real media', async () => {
   captureDiagnostics(window)
   await expect(window.getByText('input.mp4', { exact: true })).toBeVisible({ timeout: 15_000 })
   await dismissHardwareWarningIfNeeded(window)
-  const preview = window.locator('.preview-stage > video')
+  const preview = window.locator('.camera-layer > video:not(.preview-transition-previous)')
   await expect.poll(() => preview.evaluate((element) => {
     const video = element as HTMLVideoElement
     return {
@@ -151,7 +151,7 @@ test('seeks and plays a synthetic twenty-minute video', async () => {
   ])
   const app = await electron.launch({ args: [main, input], env: e2eEnvironment() })
   const window = await app.firstWindow()
-  const preview = window.locator('.preview-stage > video')
+  const preview = window.locator('.camera-layer > video:not(.preview-transition-previous)')
   await expect(window.getByText('synthetic-long.mp4', { exact: true })).toBeVisible({ timeout: 15_000 })
   await dismissHardwareWarningIfNeeded(window)
   await expect.poll(() => preview.evaluate((element) => (element as HTMLVideoElement).videoWidth), { timeout: 15_000 }).toBe(320)

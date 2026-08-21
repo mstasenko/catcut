@@ -1,6 +1,6 @@
 {
   "name": "catcut",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "description": "A focused, Wayland-native video editor",
   "author": "CatCut contributors",
   "desktopName": "catcut.desktop",
@@ -28,6 +28,8 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test": "node scripts/test.mjs",
+    "test:ci": "CI=1 LIBGL_ALWAYS_SOFTWARE=1 npm test",
+    "verify:ci": "npm ci && npm audit --omit=dev --audit-level=high && npm run test:ci",
     "test:vitest": "vitest run --coverage && node scripts/quality.mjs",
     "test:e2e": "electron-vite build --logLevel error && node scripts/run-headless-wayland.mjs node_modules/.bin/playwright test",
     "test:quality": "node scripts/quality.mjs",

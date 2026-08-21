@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import type { EditSession, GpuDiagnostics, JobProgress, Overlay } from '@shared/types'
+import type { EditSession, FocusZoomAmount, GpuDiagnostics, JobProgress, Overlay } from '@shared/types'
 import catcutIcon from '../../../catcut-icon.png'
 import type { EditorState } from '../model/store'
 import { primarySource } from '../model/timeline'
@@ -91,13 +91,16 @@ function ProjectActions({ store, exporting, onExport }: {
   )
 }
 
-function SidePanel({ store, session, selected, duration, exporting, onExport }: {
+function SidePanel({ store, session, selected, duration, exporting, onExport, onPause, onFocusPick, onPreviewText }: {
   store: EditorState
   session: EditSession
   selected: Overlay | null
   duration: number
   exporting: boolean
   onExport: () => void
+  onPause: () => void
+  onFocusPick: (zoom: FocusZoomAmount) => void
+  onPreviewText: (overlay: Overlay) => void
 }): React.JSX.Element {
   const [assetCategory, setAssetCategory] = useState<AssetCategory | null>(null)
   return (
@@ -116,11 +119,14 @@ function SidePanel({ store, session, selected, duration, exporting, onExport }: 
               onBack={() => store.selectOverlay(null)}
               onChange={(patch) => store.updateOverlay(selected.id, patch)}
               onRemove={store.removeSelectedOverlay}
+              onAnimation={(preset) => store.setTextAnimation(selected.id, preset)}
+              onPreviewAnimation={() => onPreviewText(selected)}
             />
           )
         : (
             <AssetPanel
               assets={store.assets}
+              session={session}
               category={assetCategory}
               onCategory={setAssetCategory}
               onText={() => { setAssetCategory(null); store.addText() }}
@@ -128,6 +134,13 @@ function SidePanel({ store, session, selected, duration, exporting, onExport }: 
               onInsert={(transitions) => void store.insertVideo(transitions)}
               onAsset={(asset) => void store.addAsset(asset)}
               onError={store.showError}
+              onSpeed={(rate) => { onPause(); store.setSpeed(rate) }}
+              onFocusPick={(zoom) => { onPause(); onFocusPick(zoom) }}
+              onRemoveFocusZoom={() => { onPause(); store.removeFocusZoom() }}
+              onFreeze={(effectDuration) => { onPause(); store.insertFreeze(effectDuration) }}
+              onRemoveFreeze={() => { onPause(); store.removeFreeze() }}
+              onReplay={() => { onPause(); store.insertReplay() }}
+              onRemoveReplay={() => { onPause(); store.removeReplay() }}
             />
           )}
     </aside>
@@ -144,7 +157,8 @@ export function EditorWorkspace({
   exporting,
   onPlayingChange,
   onZoom,
-  onExport
+  onExport,
+  onStep
 }: {
   store: EditorState
   session: EditSession
@@ -156,16 +170,21 @@ export function EditorWorkspace({
   onPlayingChange: (value: boolean) => void
   onZoom: (value: number) => void
   onExport: () => void
+  onStep: (direction: -1 | 1) => void
 }): React.JSX.Element {
+  const [focusPicking, setFocusPicking] = useState<FocusZoomAmount | null>(null)
   return (
     <main className="workspace" inert={exporting}>
-      <SidePanel store={store} session={session} selected={selected} duration={duration} exporting={exporting} onExport={onExport} />
+      <SidePanel store={store} session={session} selected={selected} duration={duration} exporting={exporting} onExport={onExport} onPause={() => onPlayingChange(false)} onFocusPick={setFocusPicking} onPreviewText={(overlay) => {
+        onPlayingChange(false)
+        store.setPlayhead(overlay.start)
+        setTimeout(() => onPlayingChange(true), 0)
+      }} />
       <div className="editor-column">
         <Preview
           session={session}
           playing={playing}
           zoom={zoom}
-          hasCutPoints={session.cutPoints.length > 0}
           canUndo={store.history.length > 0}
           canRedo={store.future.length > 0}
           onPlayingChange={onPlayingChange}
@@ -180,6 +199,10 @@ export function EditorWorkspace({
           onDeleteSelection={store.deleteSelection}
           onUndo={store.undo}
           onRedo={store.redo}
+          onStep={onStep}
+          focusPicking={focusPicking}
+          onFocusZoom={(focusZoom, x, y) => { store.addFocusZoom(focusZoom, x, y); setFocusPicking(null) }}
+          onCancelFocusPick={() => setFocusPicking(null)}
         />
         <Timeline
           session={session}
